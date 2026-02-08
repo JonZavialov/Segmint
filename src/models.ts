@@ -55,6 +55,16 @@ export interface FileStatus {
   status: string;
 }
 
+export interface LogCommit {
+  sha: string;
+  short_sha: string;
+  subject: string;
+  author_name: string;
+  author_email: string;
+  author_date: string;
+  parents: string[];
+}
+
 export interface RepoStatus {
   is_git_repo: boolean;
   root_path: string;

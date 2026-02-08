@@ -34,10 +34,11 @@ Segmint is **infrastructure**, not an application. It provides structured Git pr
 **Current phase: Phase 3 complete. `repo_status` (Tier 1) implemented ahead of Phase 6.**
 
 Completed:
-- Phase 1: MCP stdio server wired, 6 tools registered, canonical models, mock data, smoke tests
+- Phase 1: MCP stdio server wired, 7 tools registered, canonical models, mock data, smoke tests
 - Phase 2: `list_changes` returns real uncommitted changes (staged + unstaged) parsed from `git diff`
 - Phase 3: `group_changes` uses OpenAI embeddings + cosine-similarity clustering to group changes by intent
 - `repo_status` (Tier 1 read-only) implemented — structured repo state via git status porcelain parsing
+- `log` (Tier 1 read-only) implemented — structured commit history with filtering
 
 Planned phases (do NOT start unless explicitly instructed):
 
@@ -87,6 +88,7 @@ Defined in `src/models.ts`. These are the canonical shapes:
 - **ChangeGroup** — related changes clustered by intent: `{ id, change_ids[], summary }`
 - **CommitPlan** — a proposed commit: `{ id, title, description, change_group_ids[] }`
 - **PullRequestDraft** — a PR covering multiple commits: `{ title, description, commits[] }`
+- **LogCommit** — a single commit from history (Tier 1): `{ sha, short_sha, subject, author_name, author_email, author_date, parents[] }`
 - **RepoStatus** — structured repo state snapshot (Tier 1): `{ is_git_repo, root_path, head, staged[], unstaged[], untracked[], ahead_by?, behind_by?, upstream?, merge_in_progress, rebase_in_progress }`
 
 ## MCP Tool Contracts
@@ -97,6 +99,7 @@ These names and signatures are canonical. Do not rename or change contracts with
 |---|---|---|---|---|
 | `repo_status` | 1 | `{}` | `RepoStatus` | Structured repository state |
 | `list_changes` | 1 | `{}` | `{ changes: Change[] }` | List uncommitted changes as structured objects |
+| `log` | 1 | `{ limit?, ref?, path?, since?, until?, include_merges? }` | `{ commits: LogCommit[] }` | Structured commit history with filtering |
 | `group_changes` | — | `{ change_ids: string[] }` | `{ groups: ChangeGroup[] }` | Group changes by intent |
 | `propose_commits` | — | `{ group_ids: string[] }` | `{ commits: CommitPlan[] }` | Propose commits from groups (mocked) |
 | `apply_commit` | — | `{ commit_id: string }` | `{ success: boolean }` | Apply a commit plan to the repo (mocked) |
@@ -134,6 +137,7 @@ src/
   changes.ts      — Shared change-loading, ID resolution, embedding text builder
   embeddings.ts   — Pluggable EmbeddingProvider interface + OpenAI implementation
   cluster.ts      — Cosine similarity + centroid-based greedy clustering
+  history.ts      — Commit history retrieval (Tier 1 read-only)
   status.ts       — Repository status gathering (Tier 1 read-only)
 typescript-sdk/   — Local copy of MCP TypeScript SDK (READ-ONLY)
 llms-full.txt     — MCP protocol documentation (READ-ONLY)
@@ -179,7 +183,7 @@ npm start        # node build/index.js (stdio)
 
 1. `npm run build` must succeed with zero errors.
 2. Start the MCP server and confirm it responds to `initialize`.
-3. Call `tools/list` and verify all 6 tools are present.
+3. Call `tools/list` and verify all 7 tools are present.
 4. Call `list_changes` and verify structured output.
 5. Call at least one additional tool.
 
@@ -197,7 +201,8 @@ Send these messages over stdin (each on its own line):
 {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
 {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"repo_status","arguments":{}}}
 {"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"list_changes","arguments":{}}}
-{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"group_changes","arguments":{"change_ids":["change-1","change-2"]}}}
+{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"log","arguments":{"limit":5}}}
+{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"group_changes","arguments":{"change_ids":["change-1","change-2"]}}}
 ```
 
 ## Coding Standards

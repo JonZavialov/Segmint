@@ -7,7 +7,7 @@
  * Model Context Protocol so agents can inspect diffs, cluster edits by intent,
  * and operate on Git at a semantic level.
  *
- * repo_status, list_changes, and group_changes use real git + embeddings.
+ * repo_status, list_changes, log, and group_changes use real git + embeddings.
  * propose_commits, apply_commit, generate_pr return mocked data.
  */
 
@@ -23,6 +23,7 @@ import { loadChanges, resolveChangeIds, buildEmbeddingText } from "./changes.js"
 import { getEmbeddingProvider } from "./embeddings.js";
 import { clusterByThreshold } from "./cluster.js";
 import { getRepoStatus } from "./status.js";
+import { getLog } from "./history.js";
 
 // ---------------------------------------------------------------------------
 // Server
@@ -114,6 +115,72 @@ server.registerTool(
       return {
         content: [{ type: "text", text: JSON.stringify(status, null, 2) }],
         structuredContent: { ...status },
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        content: [{ type: "text", text: message }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Tool: log (Tier 1 — read-only)
+// ---------------------------------------------------------------------------
+
+server.registerTool(
+  "log",
+  {
+    description:
+      "Retrieve commit history as structured objects. Supports limit, ref, path filtering, date range, and merge filtering.",
+    inputSchema: z.object({
+      limit: z
+        .number()
+        .optional()
+        .describe("Max commits to return (default 20, clamped 1..200)"),
+      ref: z
+        .string()
+        .optional()
+        .describe("Git ref to start from (default HEAD)"),
+      path: z
+        .string()
+        .optional()
+        .describe("Restrict to commits touching this path"),
+      since: z
+        .string()
+        .optional()
+        .describe("Only commits after this date (ISO 8601 or git date string)"),
+      until: z
+        .string()
+        .optional()
+        .describe("Only commits before this date (ISO 8601 or git date string)"),
+      include_merges: z
+        .boolean()
+        .optional()
+        .describe("Include merge commits (default false)"),
+    }),
+    outputSchema: z.object({
+      commits: z.array(
+        z.object({
+          sha: z.string(),
+          short_sha: z.string(),
+          subject: z.string(),
+          author_name: z.string(),
+          author_email: z.string(),
+          author_date: z.string(),
+          parents: z.array(z.string()),
+        })
+      ),
+    }),
+  },
+  async (args, _extra) => {
+    try {
+      const result = getLog(args);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        structuredContent: result,
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

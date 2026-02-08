@@ -42,6 +42,7 @@ Segmint runs as a stdio-based MCP server. An AI agent connects over stdin/stdout
 |---|---|---|---|
 | `repo_status` | 1 | Real | Structured repository state — HEAD, staged/unstaged/untracked, ahead/behind, merge/rebase |
 | `list_changes` | 1 | Real | Parse uncommitted diffs into structured `Change[]` objects |
+| `log` | 1 | Real | Structured commit history with ref, path, date, and merge filtering |
 | `group_changes` | — | Real | Cluster changes by semantic similarity into `ChangeGroup[]` |
 | `propose_commits` | — | Mocked | Propose a commit sequence from change groups |
 | `apply_commit` | — | Mocked | Stage and commit files for a given commit plan |
@@ -68,6 +69,18 @@ Returns all uncommitted changes (staged + unstaged) as structured `Change[]` obj
 - Sorts by file path, assigns deterministic IDs (`change-1`, `change-2`, ...)
 - Handles new files, deleted files, skips binary files
 - Returns `{ isError: true }` if not in a git repository
+
+### log
+
+Returns commit history as structured `LogCommit[]` objects.
+
+- Input: `{ limit?, ref?, path?, since?, until?, include_merges? }`
+- Default: 20 commits from HEAD, no merges
+- Limit clamped to 1..200
+- Supports date filtering via `since` / `until` (ISO 8601 or git date strings)
+- Path filtering restricts to commits touching the given path
+- Uses NUL-delimited format for safe parsing of commit fields
+- Returns `{ isError: true }` for bad refs, paths, or non-git directories
 
 ### group_changes
 
@@ -123,6 +136,12 @@ All models are defined in `src/models.ts`.
 { title: string, description: string, commits: CommitPlan[] }
 ```
 
+**LogCommit** — a single commit from history (Tier 1).
+```
+{ sha: string, short_sha: string, subject: string, author_name: string,
+  author_email: string, author_date: string, parents: string[] }
+```
+
 **RepoStatus** — structured repository state snapshot (Tier 1).
 ```
 { is_git_repo, root_path, head: HeadInfo, staged: FileStatus[],
@@ -135,6 +154,7 @@ All models are defined in `src/models.ts`.
 | Stage | Status | Implementation |
 |---|---|---|
 | Repo status | Real | `git status --porcelain=v1 -b`, `git rev-parse`, `.git/` state detection |
+| Commit history | Real | `git log` with NUL-delimited format, ref/path/date/merge filtering |
 | `git diff` parsing | Real | Runs `git diff` and `git diff --cached`, merges staged + unstaged per file |
 | Change ID assignment | Real | Sorted by file path, assigned as `change-1`, `change-2`, ... |
 | Embedding text | Real | Built from file path + hunk headers + diff lines (truncated at 200 lines) |
@@ -149,7 +169,7 @@ All models are defined in `src/models.ts`.
 
 ```
 src/
-  index.ts        MCP server entrypoint. Registers all 6 tools and starts stdio transport.
+  index.ts        MCP server entrypoint. Registers all 7 tools and starts stdio transport.
   models.ts       TypeScript interfaces for all data models (Change, RepoStatus, etc.).
   git.ts          Executes git diff commands, parses unified diff format into Change objects.
   changes.ts      Shared change-loading helper. Single source of truth for ID assignment.
@@ -157,6 +177,7 @@ src/
   embeddings.ts   Pluggable EmbeddingProvider interface. Ships with OpenAI implementation
                   using text-embedding-3-small.
   cluster.ts      Cosine similarity function and centroid-based greedy clustering algorithm.
+  history.ts      Commit history retrieval — Tier 1 read-only, NUL-delimited parsing.
   status.ts       Repository status gathering — Tier 1 read-only repo intelligence.
   mock-data.ts    Deterministic mock data for propose_commits, apply_commit, generate_pr.
                   Part of the test contract — IDs are relied on by smoke tests.
@@ -201,7 +222,8 @@ The server communicates via stdin/stdout using JSON-RPC. Send one message per li
 {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
 {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"repo_status","arguments":{}}}
 {"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"list_changes","arguments":{}}}
-{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"group_changes","arguments":{"change_ids":["change-1","change-2"]}}}
+{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"log","arguments":{"limit":5}}}
+{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"group_changes","arguments":{"change_ids":["change-1","change-2"]}}}
 ```
 
 Start the server and pipe input:
@@ -237,7 +259,7 @@ The next major development focus is **Tier 1 + Tier 2**. These tiers define what
 Tools that let an agent understand repository state without mutating anything. These are the highest priority because they are safe, composable, and foundational for all downstream operations.
 
 - `repo_status` — staged/unstaged/untracked counts, current branch, ahead/behind remote ✅
-- `log` — commit history with filters (author, date range, paths, max count)
+- `log` — commit history with filters (date range, path, ref, merge filtering, limit) ✅
 - `show_commit` — full commit details (message, author, diff) for a given SHA
 - `diff` — structured diff between any two refs (branches, commits, tags) with optional path filtering
 - `blame` — line-level attribution for a file or line range
