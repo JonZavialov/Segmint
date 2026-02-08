@@ -6,7 +6,8 @@
     "segmint": "./build/index.js"
   },
   "scripts": {
-    "build": "tsc && chmod 755 build/index.js"
+    "build": "tsc",
+    "start": "node build/index.js"
   },
   "files": [
     "build"
