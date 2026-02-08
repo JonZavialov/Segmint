@@ -244,6 +244,21 @@ Send these messages over stdin (each on its own line):
 - Do not push to any remote without explicit instruction.
 - If commit messages are requested, they must be semantic and aligned with Segmint's intent model (e.g., `feat(auth): add token expiry validation`).
 
+## Documentation Rules
+
+> These rules exist to prevent documentation drift as Segmint evolves.
+
+- `README.md` is a first-class product artifact, not optional documentation.
+- Any task that changes behavior, architecture, or roadmap MUST also update `README.md`.
+- `README.md` must always accurately reflect:
+  - Which MCP tools are real vs mocked
+  - Current pipeline stages
+  - Environment variables
+  - Directory structure
+  - Roadmap phase
+- If functionality is added or removed, `README.md` is updated in the same task.
+- Pull requests or task completions are considered incomplete if `README.md` is stale.
+
 ## Maintaining This File
 
 This file must stay in sync with the codebase. If you change any of the following, update CLAUDE.md before finishing:
