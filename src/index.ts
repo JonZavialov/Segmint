@@ -5,7 +5,7 @@
  * Exposes Git as semantic objects (Change, ChangeGroup, CommitPlan, PullRequestDraft)
  * so AI agents can inspect a repo, cluster edits by intent, plan commits, and generate PRs.
  *
- * This is the MCP skeleton with mocked data. Real git + embeddings come later.
+ * Exposes real git changes via list_changes. Other tools return mocked data.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -17,6 +17,7 @@ import {
   MOCK_COMMIT_PLANS,
   MOCK_PR_DRAFT,
 } from "./mock-data.js";
+import { getUncommittedChanges } from "./git.js";
 
 // ---------------------------------------------------------------------------
 // Server
@@ -57,11 +58,20 @@ server.registerTool(
     }),
   },
   async (_args, _extra) => {
-    const result = { changes: MOCK_CHANGES };
-    return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-      structuredContent: result,
-    };
+    try {
+      const changes = getUncommittedChanges();
+      const result = { changes };
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        structuredContent: result,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        content: [{ type: "text", text: message }],
+        isError: true,
+      };
+    }
   }
 );
 

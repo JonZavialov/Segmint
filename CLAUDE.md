@@ -14,20 +14,16 @@ LLMs participate only in: group summaries, commit planning, and PR generation. E
 
 ## Project Status
 
-**Current phase: Phase 1 — MCP skeleton with deterministic mocked data.**
+**Current phase: Phase 2 — Real git diff parsing implemented for `list_changes`.**
 
 Completed:
-- MCP stdio server wired and responding
-- 5 tools registered with Zod input/output schemas
-- Canonical data models defined (`Change`, `ChangeGroup`, `CommitPlan`, `PullRequestDraft`)
-- Deterministic mock data implemented
-- Smoke test sequence documented
+- Phase 1: MCP stdio server wired, 5 tools registered, canonical models, mock data, smoke tests
+- Phase 2: `list_changes` returns real uncommitted changes (staged + unstaged) parsed from `git diff`
 
 Planned phases (do NOT start unless explicitly instructed):
 
 | Phase | Scope |
 |---|---|
-| Phase 2 | Real git diff parsing → Change objects |
 | Phase 3 | Embeddings + clustering → ChangeGroups |
 | Phase 4 | Commit planner agent |
 | Phase 5 | Executor + PR generation |
@@ -103,6 +99,7 @@ All tools must follow these conventions:
 - IDs (`change-1`, `change-2`, `group-1`, `group-2`, `commit-1`, `commit-2`) are relied on by the smoke test sequence.
 - Do not change mock shapes, IDs, or return values unless tests are updated simultaneously.
 - Mock behavior must remain fully deterministic — no randomness, no timestamps, no external state.
+- `list_changes` now returns real git changes, but `group_changes`, `propose_commits`, `apply_commit`, and `generate_pr` still validate against mock IDs. Real change IDs from `list_changes` will not match mock IDs — this is expected until those tools are implemented with real logic.
 
 ## Directory Structure
 
@@ -111,6 +108,7 @@ src/
   index.ts        — MCP server entrypoint, tool registration
   models.ts       — TypeScript interfaces for data models
   mock-data.ts    — Deterministic mock data (test contract)
+  git.ts          — Git diff execution and unified diff parsing
 typescript-sdk/   — Local copy of MCP TypeScript SDK (READ-ONLY)
 llms-full.txt     — MCP protocol documentation (READ-ONLY)
 build/            — Compiled output (gitignored)
@@ -186,6 +184,49 @@ Send these messages over stdin (each on its own line):
 - Do not refactor unrelated code.
 - Do not add comments, docstrings, or type annotations to code you did not change.
 - No speculative abstractions. Three similar lines are better than a premature helper.
+
+## Planning Rules (Do Not Regress)
+
+> These rules exist because we previously planned `git diff HEAD` with a HEAD-existence fallback for `list_changes`. That was wrong — it conflates staged and unstaged changes and behaves poorly on fresh repos. The correct approach (two separate diffs, merged deterministically) was caught in review. These rules prevent repeating that class of mistake.
+
+### Requirements-first planning
+
+- Do not assume git commands or MCP APIs. Confirm behavior from `./llms-full.txt`, `./typescript-sdk`, and existing code before proposing.
+- State exact acceptance criteria before proposing implementation steps.
+
+### Git change capture (Segmint v1)
+
+- `list_changes` MUST capture staged + unstaged changes by running BOTH:
+  - `git diff --no-color --unified=3` (unstaged)
+  - `git diff --cached --no-color --unified=3` (staged)
+- Do NOT use `git diff HEAD` for `list_changes`.
+- No HEAD existence checks or fallbacks are needed — these two commands work on fresh repos.
+
+### Diff parsing
+
+- Parse `diff --git a/<path> b/<path>` headers to extract file paths.
+- Handle `/dev/null` correctly:
+  - If `b` is `/dev/null` → deleted file → use `a/<path>`.
+  - If `a` is `/dev/null` → new file → use `b/<path>`.
+  - `file_path` must never be `/dev/null`.
+- Preserve the full `@@ ... @@` line as the hunk `header` field (store the exact line, not a subset).
+
+### Determinism
+
+- Sort Changes by `file_path` before assigning IDs.
+- Assign IDs as `change-1`, `change-2`, … (1-indexed, after sorting).
+- When merging staged + unstaged hunks for the same file, concatenate in fixed order: staged first, then unstaged.
+
+### MCP stdio hygiene
+
+- stdout must contain ONLY JSON-RPC protocol output.
+- All logs go to stderr (`console.error`) or are removed entirely.
+- No banners, no startup messages on stdout.
+
+### Scale and safety
+
+- Configure `execFileSync` with sufficient `maxBuffer` (currently 10 MB) so large diffs do not crash.
+- On errors (not a git repo, git not installed), return structured tool errors (`{ isError: true }`). Do not crash the server.
 
 ## Git and Commit Rules
 
