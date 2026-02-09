@@ -34,13 +34,14 @@ Segmint is **infrastructure**, not an application. It provides structured Git pr
 **Current phase: Phase 3 complete. `repo_status` (Tier 1) implemented ahead of Phase 6.**
 
 Completed:
-- Phase 1: MCP stdio server wired, 9 tools registered, canonical models, mock data, smoke tests
+- Phase 1: MCP stdio server wired, 10 tools registered, canonical models, mock data, smoke tests
 - Phase 2: `list_changes` returns real uncommitted changes (staged + unstaged) parsed from `git diff`
 - Phase 3: `group_changes` uses OpenAI embeddings + cosine-similarity clustering to group changes by intent
 - `repo_status` (Tier 1 read-only) implemented — structured repo state via git status porcelain parsing
 - `log` (Tier 1 read-only) implemented — structured commit history with filtering
 - `show_commit` (Tier 1 read-only) implemented — full commit details with metadata, files, and structured diff
 - `diff_between_refs` (Tier 1 read-only) implemented — structured diff between any two refs
+- `blame` (Tier 1 read-only) implemented — line-level attribution with commit metadata
 
 Planned phases (do NOT start unless explicitly instructed):
 
@@ -94,6 +95,9 @@ Defined in `src/models.ts`. These are the canonical shapes:
 - **LogCommit** — a single commit from history (Tier 1): `{ sha, short_sha, subject, author_name, author_email, author_date, parents[] }`
 - **CommitDetail** — full commit details (Tier 1): `{ sha, short_sha, subject, body, author_name, author_email, author_date, committer_name, committer_email, committer_date, parents[], files[], diff: { changes: Change[] } }`
 - **RepoStatus** — structured repo state snapshot (Tier 1): `{ is_git_repo, root_path, head, staged[], unstaged[], untracked[], ahead_by?, behind_by?, upstream?, merge_in_progress, rebase_in_progress }`
+- **BlameResult** — line-level blame output (Tier 1): `{ path, ref, lines: BlameLine[] }`
+- **BlameLine** — a single blamed line: `{ line_number, content, commit: BlameCommit }`
+- **BlameCommit** — blame commit metadata: `{ sha, short_sha, author_name, author_email, author_time, summary }`
 
 ## MCP Tool Contracts
 
@@ -106,6 +110,7 @@ These names and signatures are canonical. Do not rename or change contracts with
 | `log` | 1 | `{ limit?, ref?, path?, since?, until?, include_merges? }` | `{ commits: LogCommit[] }` | Structured commit history with filtering |
 | `show_commit` | 1 | `{ sha: string }` | `{ commit: CommitDetail }` | Full commit details with metadata, files, and diff |
 | `diff_between_refs` | 1 | `{ base, head, path?, unified? }` | `{ base, head, changes: Change[] }` | Structured diff between any two refs |
+| `blame` | 1 | `{ path, ref?, start_line?, end_line?, ignore_whitespace?, detect_moves? }` | `BlameResult` | Line-level attribution for a file |
 | `group_changes` | — | `{ change_ids: string[] }` | `{ groups: ChangeGroup[] }` | Group changes by intent |
 | `propose_commits` | — | `{ group_ids: string[] }` | `{ commits: CommitPlan[] }` | Propose commits from groups (mocked) |
 | `apply_commit` | — | `{ commit_id: string }` | `{ success: boolean }` | Apply a commit plan to the repo (mocked) |
@@ -137,7 +142,7 @@ All tools must follow these conventions:
 ```
 src/
   index.ts        — MCP server entrypoint (slim — imports createServer, connects stdio)
-  server.ts       — createServer() factory with all 9 tool registrations
+  server.ts       — createServer() factory with all 10 tool registrations
   exec-git.ts     — Centralized git command execution + error handling
   models.ts       — TypeScript interfaces for data models
   mock-data.ts    — Deterministic mock data (test contract for propose_commits, apply_commit, generate_pr)
@@ -148,6 +153,7 @@ src/
   history.ts      — Commit history retrieval (Tier 1 read-only)
   show.ts         — Single commit detail retrieval (Tier 1 read-only)
   diff.ts         — Ref-to-ref structured diff (Tier 1 read-only)
+  blame.ts        — Line-level blame attribution (Tier 1 read-only)
   status.ts       — Repository status gathering (Tier 1 read-only)
 tests/
   unit/           — Unit tests for parsers, helpers, and isolated logic
@@ -243,7 +249,8 @@ Send these messages over stdin (each on its own line):
 {"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"log","arguments":{"limit":5}}}
 {"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"show_commit","arguments":{"sha":"HEAD"}}}
 {"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"diff_between_refs","arguments":{"base":"HEAD~1","head":"HEAD"}}}
-{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"group_changes","arguments":{"change_ids":["change-1","change-2"]}}}
+{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"blame","arguments":{"path":"src/index.ts"}}}
+{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"group_changes","arguments":{"change_ids":["change-1","change-2"]}}}
 ```
 
 ## Coding Standards

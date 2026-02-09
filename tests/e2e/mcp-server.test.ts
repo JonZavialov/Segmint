@@ -68,6 +68,7 @@ describe("MCP server E2E (in-process)", () => {
     const names = result.tools.map((t) => t.name).sort();
     expect(names).toEqual([
       "apply_commit",
+      "blame",
       "diff_between_refs",
       "generate_pr",
       "group_changes",
@@ -295,6 +296,43 @@ describe("MCP server E2E (in-process)", () => {
       arguments: { ref: "nonexistent-ref-xyz" },
     });
     expect(result.isError).toBe(true);
+  });
+
+  it("blame returns structured line-level data", async () => {
+    const result = await client.callTool({
+      name: "blame",
+      arguments: { path: "file.txt" },
+    });
+    expect(result.isError).toBeFalsy();
+    const sc = result.structuredContent as {
+      path: string;
+      ref: string;
+      lines: Array<{ line_number: number; content: string; commit: Record<string, string> }>;
+    };
+    expect(sc.path).toBe("file.txt");
+    expect(sc.ref).toBe("HEAD");
+    expect(sc.lines.length).toBeGreaterThanOrEqual(1);
+    expect(sc.lines[0].commit.sha).toMatch(/^[0-9a-f]{40}$/);
+    expect(sc.lines[0].commit.author_name).toBe("Test");
+  });
+
+  it("blame with invalid path returns error", async () => {
+    const result = await client.callTool({
+      name: "blame",
+      arguments: { path: "nonexistent-file.xyz" },
+    });
+    expect(result.isError).toBe(true);
+  });
+
+  it("blame with line range", async () => {
+    const result = await client.callTool({
+      name: "blame",
+      arguments: { path: "file.txt", start_line: 1, end_line: 1 },
+    });
+    expect(result.isError).toBeFalsy();
+    const sc = result.structuredContent as { lines: Array<{ line_number: number }> };
+    expect(sc.lines).toHaveLength(1);
+    expect(sc.lines[0].line_number).toBe(1);
   });
 
   it("generate_pr with unknown IDs returns error", async () => {

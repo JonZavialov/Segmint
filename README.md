@@ -45,6 +45,7 @@ Segmint runs as a stdio-based MCP server. An AI agent connects over stdin/stdout
 | `log` | 1 | Real | Structured commit history with ref, path, date, and merge filtering |
 | `show_commit` | 1 | Real | Full commit details — metadata, affected files, and structured diff |
 | `diff_between_refs` | 1 | Real | Structured diff between any two refs with optional path filtering |
+| `blame` | 1 | Real | Line-level attribution — commit SHA, author, timestamp, summary per line |
 | `group_changes` | — | Real | Cluster changes by semantic similarity into `ChangeGroup[]` |
 | `propose_commits` | — | Mocked | Propose a commit sequence from change groups |
 | `apply_commit` | — | Mocked | Stage and commit files for a given commit plan |
@@ -106,6 +107,19 @@ Returns a structured diff between any two git refs as `Change[]` objects.
 - Reuses existing `parseDiff` pipeline for Change/Hunk construction
 - IDs are scoped to this output (`change-1`, `change-2`, ...), sorted by file path
 - Returns `{ isError: true }` for invalid refs or non-git directories
+
+### blame
+
+Returns line-level attribution for a file, showing which commit last modified each line.
+
+- Input: `{ path, ref?, start_line?, end_line?, ignore_whitespace?, detect_moves? }`
+- Default ref: HEAD
+- Optional line range filtering via `start_line` / `end_line` (1-indexed, inclusive)
+- `ignore_whitespace` (`-w`) ignores whitespace-only changes in attribution
+- `detect_moves` (`-M -C`) detects lines moved/copied across files
+- Each output line includes: line number, content, and commit metadata (SHA, author, timestamp, summary)
+- Timestamps are ISO 8601
+- Returns `{ isError: true }` for invalid paths, bad refs, or non-git directories
 
 ### group_changes
 
@@ -181,6 +195,21 @@ All models are defined in `src/models.ts`.
   upstream?, merge_in_progress, rebase_in_progress }
 ```
 
+**BlameResult** — line-level blame output (Tier 1).
+```
+{ path: string, ref: string, lines: BlameLine[] }
+```
+
+**BlameLine** — a single blamed line.
+```
+{ line_number: number, content: string, commit: BlameCommit }
+```
+
+**BlameCommit** — blame commit metadata.
+```
+{ sha, short_sha, author_name, author_email, author_time, summary }
+```
+
 ### Pipeline Status
 
 | Stage | Status | Implementation |
@@ -189,6 +218,7 @@ All models are defined in `src/models.ts`.
 | Commit history | Real | `git log` with NUL-delimited format, ref/path/date/merge filtering |
 | Commit detail | Real | `git show` metadata + name-status + diff, parsed into CommitDetail |
 | Ref-to-ref diff | Real | `git diff <base> <head>` with path/context filtering, parsed into Change[] |
+| Line-level blame | Real | `git blame --line-porcelain` with line range, whitespace, and move detection |
 | `git diff` parsing | Real | Runs `git diff` and `git diff --cached`, merges staged + unstaged per file |
 | Change ID assignment | Real | Sorted by file path, assigned as `change-1`, `change-2`, ... |
 | Embedding text | Real | Built from file path + hunk headers + diff lines (truncated at 200 lines) |
@@ -204,7 +234,7 @@ All models are defined in `src/models.ts`.
 ```
 src/
   index.ts        MCP server entrypoint (slim — imports createServer, connects stdio).
-  server.ts       createServer() factory with all 9 tool registrations.
+  server.ts       createServer() factory with all 10 tool registrations.
   exec-git.ts     Centralized git command execution + error handling.
   models.ts       TypeScript interfaces for all data models (Change, RepoStatus, etc.).
   git.ts          Executes git diff commands, parses unified diff format into Change objects.
@@ -216,6 +246,7 @@ src/
   history.ts      Commit history retrieval — Tier 1 read-only, NUL-delimited parsing.
   show.ts         Single commit detail retrieval — Tier 1 read-only, reuses parseDiff.
   diff.ts         Ref-to-ref structured diff — Tier 1 read-only, reuses parseDiff.
+  blame.ts        Line-level blame attribution — Tier 1 read-only, porcelain parsing.
   status.ts       Repository status gathering — Tier 1 read-only repo intelligence.
   mock-data.ts    Deterministic mock data for propose_commits, apply_commit, generate_pr.
                   Part of the test contract — IDs are relied on by smoke tests.
@@ -271,7 +302,8 @@ The server communicates via stdin/stdout using JSON-RPC. Send one message per li
 {"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"log","arguments":{"limit":5}}}
 {"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"show_commit","arguments":{"sha":"HEAD"}}}
 {"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"diff_between_refs","arguments":{"base":"HEAD~1","head":"HEAD"}}}
-{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"group_changes","arguments":{"change_ids":["change-1","change-2"]}}}
+{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"blame","arguments":{"path":"src/index.ts"}}}
+{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"group_changes","arguments":{"change_ids":["change-1","change-2"]}}}
 ```
 
 Start the server and pipe input:
@@ -310,7 +342,7 @@ Tools that let an agent understand repository state without mutating anything. T
 - `log` — commit history with filters (date range, path, ref, merge filtering, limit) ✅
 - `show_commit` — full commit details (message, author, diff) for a given SHA ✅
 - `diff_between_refs` — structured diff between any two refs (branches, commits, tags) with optional path filtering ✅
-- `blame` — line-level attribution for a file or line range
+- `blame` — line-level attribution for a file or line range ✅
 - `list_branches` / `list_tags` / `current_branch` — ref enumeration
 - `list_remotes` / `remote_info` — remote configuration
 

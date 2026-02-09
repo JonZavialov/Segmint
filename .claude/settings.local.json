@@ -20,7 +20,8 @@
       "Bash(file:*)",
       "Bash(git add:*)",
       "Bash(git rm:*)",
-      "Bash(powershell -Command \"$input | Select-String -Pattern ''\\\\r''\")"
+      "Bash(powershell -Command \"$input | Select-String -Pattern ''\\\\r''\")",
+      "Bash(git -C C:UsersjzavyDesktopSegMint status --porcelain NUL)"
     ]
   }
 }

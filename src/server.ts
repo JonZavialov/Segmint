@@ -20,6 +20,7 @@ import { getRepoStatus } from "./status.js";
 import { getLog } from "./history.js";
 import { getCommit } from "./show.js";
 import { getDiffBetweenRefs } from "./diff.js";
+import { getBlame } from "./blame.js";
 
 // ---------------------------------------------------------------------------
 // Shared schemas
@@ -47,7 +48,7 @@ const changeSchema = z.object({
 /**
  * Create a fully-configured Segmint MCP server.
  *
- * The returned server has all 9 tools registered and is ready to be
+ * The returned server has all 10 tools registered and is ready to be
  * connected to any MCP transport (stdio, in-memory, etc.).
  */
 export function createServer(): McpServer {
@@ -304,6 +305,82 @@ export function createServer(): McpServer {
             changes: changes.map((c) => ({
               ...c,
               hunks: c.hunks.map((h) => ({ ...h, lines: [...h.lines] })),
+            })),
+          },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          content: [{ type: "text", text: message }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // -------------------------------------------------------------------------
+  // Tool: blame (Tier 1 — read-only)
+  // -------------------------------------------------------------------------
+
+  server.registerTool(
+    "blame",
+    {
+      description:
+        "Line-level attribution for a file: for each line, returns the commit SHA, author, timestamp, and summary. Supports line ranges, whitespace-ignoring, and move/copy detection.",
+      inputSchema: z.object({
+        path: z.string().describe("Repo-relative file path to blame"),
+        ref: z
+          .string()
+          .optional()
+          .describe("Git ref to blame at (default HEAD)"),
+        start_line: z
+          .number()
+          .optional()
+          .describe("Start line (1-indexed, inclusive)"),
+        end_line: z
+          .number()
+          .optional()
+          .describe("End line (1-indexed, inclusive)"),
+        ignore_whitespace: z
+          .boolean()
+          .optional()
+          .describe("Ignore whitespace changes (default false)"),
+        detect_moves: z
+          .boolean()
+          .optional()
+          .describe("Detect moved/copied lines across files (default false)"),
+      }),
+      outputSchema: z.object({
+        path: z.string(),
+        ref: z.string(),
+        lines: z.array(
+          z.object({
+            line_number: z.number(),
+            content: z.string(),
+            commit: z.object({
+              sha: z.string(),
+              short_sha: z.string(),
+              author_name: z.string(),
+              author_email: z.string(),
+              author_time: z.string(),
+              summary: z.string(),
+            }),
+          })
+        ),
+      }),
+    },
+    async ({ path, ref, start_line, end_line, ignore_whitespace, detect_moves }, _extra) => {
+      try {
+        const result = getBlame({ path, ref, start_line, end_line, ignore_whitespace, detect_moves });
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          structuredContent: {
+            path: result.path,
+            ref: result.ref,
+            lines: result.lines.map((l) => ({
+              line_number: l.line_number,
+              content: l.content,
+              commit: { ...l.commit },
             })),
           },
         };

@@ -94,3 +94,24 @@ export interface RepoStatus {
   merge_in_progress: boolean;
   rebase_in_progress: boolean;
 }
+
+export interface BlameCommit {
+  sha: string;
+  short_sha: string;
+  author_name: string;
+  author_email: string;
+  author_time: string;
+  summary: string;
+}
+
+export interface BlameLine {
+  line_number: number;
+  content: string;
+  commit: BlameCommit;
+}
+
+export interface BlameResult {
+  path: string;
+  ref: string;
+  lines: BlameLine[];
+}

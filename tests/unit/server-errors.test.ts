@@ -16,6 +16,7 @@ const mockGetRepoStatus = vi.fn();
 const mockGetLog = vi.fn();
 const mockGetCommit = vi.fn();
 const mockGetDiffBetweenRefs = vi.fn();
+const mockGetBlame = vi.fn();
 const mockGetEmbeddingProvider = vi.fn();
 
 vi.mock("../../src/changes.js", () => ({
@@ -38,6 +39,10 @@ vi.mock("../../src/show.js", () => ({
 
 vi.mock("../../src/diff.js", () => ({
   getDiffBetweenRefs: (...args: unknown[]) => mockGetDiffBetweenRefs(...args),
+}));
+
+vi.mock("../../src/blame.js", () => ({
+  getBlame: (...args: unknown[]) => mockGetBlame(...args),
 }));
 
 vi.mock("../../src/embeddings.js", () => ({
@@ -239,5 +244,31 @@ describe("server.ts error catch blocks", () => {
     });
     expect(result.isError).toBe(true);
     expect((result.content as Array<{ text: string }>)[0].text).toBe("group string error");
+  });
+
+  it("blame catch block returns isError on throw", async () => {
+    mockGetBlame.mockImplementation(() => {
+      throw new Error("no such path");
+    });
+
+    const result = await client.callTool({
+      name: "blame",
+      arguments: { path: "missing.txt" },
+    });
+    expect(result.isError).toBe(true);
+    expect((result.content as Array<{ text: string }>)[0].text).toBe("no such path");
+  });
+
+  it("blame catch with non-Error value", async () => {
+    mockGetBlame.mockImplementation(() => {
+      throw "blame string error";
+    });
+
+    const result = await client.callTool({
+      name: "blame",
+      arguments: { path: "missing.txt" },
+    });
+    expect(result.isError).toBe(true);
+    expect((result.content as Array<{ text: string }>)[0].text).toBe("blame string error");
   });
 });
