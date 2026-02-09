@@ -15,7 +15,12 @@
       "Bash(findstr:*)",
       "Bash(dir:*)",
       "Bash(npm install:*)",
-      "Bash(npx vitest:*)"
+      "Bash(npx vitest:*)",
+      "Bash(set:*)",
+      "Bash(file:*)",
+      "Bash(git add:*)",
+      "Bash(git rm:*)",
+      "Bash(powershell -Command \"$input | Select-String -Pattern ''\\\\r''\")"
     ]
   }
 }

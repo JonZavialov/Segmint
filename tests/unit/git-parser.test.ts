@@ -6,7 +6,7 @@ import { parseDiff } from "../../src/git.js";
 const fixtureDir = join(__dirname, "..", "fixtures", "diffs");
 
 function loadFixture(name: string): string {
-  return readFileSync(join(fixtureDir, name), "utf8");
+  return readFileSync(join(fixtureDir, name), "utf8").replace(/\r\n/g, "\n");
 }
 
 describe("parseDiff", () => {
