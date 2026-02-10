@@ -26,7 +26,11 @@
       "Bash(powershell -Command \"@''\n{\"\"jsonrpc\"\":\"\"2.0\"\",\"\"id\"\":0,\"\"method\"\":\"\"initialize\"\",\"\"params\"\":{\"\"protocolVersion\"\":\"\"2024-11-05\"\",\"\"capabilities\"\":{},\"\"clientInfo\"\":{\"\"name\"\":\"\"snapshot\"\",\"\"version\"\":\"\"1.0.0\"\"}}}\n{\"\"jsonrpc\"\":\"\"2.0\"\",\"\"method\"\":\"\"notifications/initialized\"\",\"\"params\"\":{}}\n{\"\"jsonrpc\"\":\"\"2.0\"\",\"\"id\"\":1,\"\"method\"\":\"\"tools/list\"\",\"\"params\"\":{}}\n''@ | node build/index.js 2>$null\")",
       "Bash(git -C \"C:\\\\Users\\\\jzavy\\\\Desktop\\\\SegMint\" config --list)",
       "Bash(SEGMINT_EMBEDDING_PROVIDER=local npm test:*)",
-      "Bash(SEGMINT_EMBEDDING_PROVIDER=local npm run test:coverage:*)"
+      "Bash(SEGMINT_EMBEDDING_PROVIDER=local npm run test:coverage:*)",
+      "Bash(npm pack:*)",
+      "Bash(cat:*)",
+      "Bash(grep:*)",
+      "Bash(git check-ignore:*)"
     ]
   }
 }

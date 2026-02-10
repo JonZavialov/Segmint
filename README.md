@@ -298,18 +298,38 @@ tests/
   e2e/            In-process E2E tests via createServer() + InMemoryTransport.
   fixtures/       Test fixture files (diffs, etc.).
 
+scripts/
+  clean.mjs       Cross-platform clean script (removes build/ and coverage/).
+
 typescript-sdk/   Local copy of the MCP TypeScript SDK (read-only reference).
 llms-full.txt     MCP protocol documentation (read-only reference).
 build/            Compiled JavaScript output (gitignored).
 .github/workflows/ CI configuration (GitHub Actions).
+.env.example      Environment variable template (copy to .env).
 ```
 
-## Environment Variables
+## Configuration
+
+Segmint uses environment variables for runtime configuration. A `.env.example` template is provided at the repository root — copy it to `.env` and fill in values as needed. `.env` is gitignored and will not be committed.
 
 | Variable | Required | Description |
 |---|---|---|
 | `OPENAI_API_KEY` | Yes (for `group_changes` with 2+ changes) | OpenAI API key for `text-embedding-3-small`. If not set, `group_changes` returns a structured MCP error with setup instructions. Single-change calls work without it. |
 | `SEGMINT_EMBEDDING_PROVIDER` | No | Set to `"local"` to use the offline SHA-256-based `LocalEmbeddingProvider` instead of OpenAI. No API key needed. Used for testing and development. |
+
+### Setting environment variables
+
+```bash
+# Linux/macOS — set in current shell
+export OPENAI_API_KEY=sk-...
+export SEGMINT_EMBEDDING_PROVIDER=local
+
+# Windows PowerShell — set in current session
+$env:OPENAI_API_KEY = "sk-..."
+$env:SEGMINT_EMBEDDING_PROVIDER = "local"
+```
+
+Or copy `.env.example` to `.env` and edit it — the server reads from the process environment, so set variables before starting.
 
 ## Running Locally
 
@@ -320,15 +340,7 @@ npm install
 npm run build
 ```
 
-### Set your OpenAI API key
-
-```bash
-# Linux/macOS
-export OPENAI_API_KEY=sk-...
-
-# Windows PowerShell
-$env:OPENAI_API_KEY = "sk-..."
-```
+The `build` script runs `npm run clean && tsc`, which removes stale artifacts from `build/` before compiling. This prevents leftover files from deleted source modules.
 
 ### Test with JSON-RPC over stdio
 

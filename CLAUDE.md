@@ -152,10 +152,13 @@ tests/
   integration/    — Integration tests against real temporary git repos
   e2e/            — In-process E2E tests via createServer() + InMemoryTransport
   fixtures/       — Test fixture files (diffs, porcelain output, etc.)
+scripts/
+  clean.mjs       — Cross-platform clean script (removes build/ and coverage/)
 typescript-sdk/   — Local copy of MCP TypeScript SDK (READ-ONLY)
 llms-full.txt     — MCP protocol documentation (READ-ONLY)
 build/            — Compiled output (gitignored)
 .github/workflows/ — CI configuration
+.env.example      — Environment variable template (copy to .env)
 ```
 
 ## Stack
@@ -192,7 +195,8 @@ Dev dependencies:
 
 ```bash
 npm install
-npm run build    # tsc
+npm run clean    # node scripts/clean.mjs (removes build/ and coverage/)
+npm run build    # npm run clean && tsc
 npm start        # node build/index.js (stdio)
 ```
 
@@ -363,6 +367,19 @@ Before implementing any new MCP tool, complete this checklist:
   - Capability Roadmap tier assignments
 - If functionality is added or removed, `README.md` is updated in the same task.
 - Pull requests or task completions are considered incomplete if `README.md` is stale.
+
+## Release Hygiene
+
+Before publishing a new version, verify the following:
+
+- [ ] **Clean build:** `npm run build` produces only files from current `src/` (the `clean` script removes `build/` first, preventing stale artifacts from deleted modules).
+- [ ] **Tests pass:** `npm run test:coverage` passes with all 95%+ thresholds met.
+- [ ] **`.env.example` up to date:** All supported environment variables are documented in `.env.example` with comments.
+- [ ] **LICENSE present:** `LICENSE` file exists at project root and `"license"` field is set in `package.json`.
+- [ ] **`engines` field set:** `package.json` specifies `"engines": { "node": ">=20" }`.
+- [ ] **Tarball clean:** `npm pack --dry-run` shows only `build/` files, `package.json`, and `README.md` — no tests, fixtures, coverage, or stale build artifacts.
+- [ ] **No secrets:** `.env` is gitignored. No API keys in source, tests, or fixtures. Rotate any key that has been exposed.
+- [ ] **Docs in sync:** README.md and CLAUDE.md reflect current tool contracts, directory structure, env vars, and roadmap phase.
 
 ## Maintaining This File
 

@@ -2,11 +2,16 @@
   "name": "segmint",
   "version": "0.1.0",
   "description": "A semantic Git runtime for AI agents — exposes repository state as structured, typed primitives over MCP.",
+  "license": "MIT",
   "bin": {
     "segmint": "./build/index.js"
   },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
-    "build": "tsc",
+    "clean": "node scripts/clean.mjs",
+    "build": "npm run clean && tsc",
     "start": "node build/index.js",
     "test": "vitest run",
     "test:unit": "vitest run tests/unit",
