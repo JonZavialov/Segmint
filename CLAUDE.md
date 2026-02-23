@@ -2,51 +2,38 @@
 
 ## What This Is
 
-Segmint is a semantic Git runtime for AI agents. It is an MCP server that turns raw `git diff` output into structured, agent-readable objects — typed Changes, semantic ChangeGroups — so any MCP-compatible agent can inspect and manipulate repository state.
+Segmint is a semantic Git runtime for AI agents. It is an MCP server that turns raw git output into structured, agent-readable objects — typed Changes, commit history, blame data, and diffs — so any MCP-compatible agent can inspect repository state.
 
-The core substrate is deterministic:
-
-```
-git diff → Change[] → embeddings → clustering → ChangeGroup[]
-```
-
-Commit planning, PR generation, and other workflows are optional downstream consumers of this substrate — not the core product.
-
-LLMs participate only in: embedding vectors (currently), and planned group summaries, commit planning, and PR generation. Everything else is mechanical.
+The core substrate is deterministic: all tools produce structured objects directly from git commands with no external dependencies.
 
 ## Product Direction (Non-Negotiable)
 
 Segmint is **infrastructure**, not an application. It provides structured Git primitives that agents operate on directly.
 
-**Core identity:** A semantic Git runtime — structured diffs, typed Change objects, intent-based grouping.
+**Core identity:** A semantic Git runtime — structured diffs, typed Change objects, commit history, blame attribution, and repository status.
 
 **What Segmint is NOT:**
 - Not a commit assistant
 - Not a PR generator
 - Not a Git workflow tool
 
-**Architectural rule:** Commit planning and PR generation are downstream features that consume the substrate. They must never be framed as the core product, and the substrate must be independently useful without them.
-
 **Language standard:** All descriptions, comments, and documentation must use substrate/runtime/primitive language. Never "assistant", "helper", or "workflow tool".
 
 ## Project Status
 
-**Current phase: v0.1 complete. All 10 MCP tools are real (no mock data).**
+**Current phase: v0.2.0 complete. 8 MCP tools, all Tier 1 read-only. Explicit repo selection via `set_repo_root`.**
 
 Completed:
-- Phase 1: MCP stdio server wired, 10 tools registered, canonical models
+- Phase 1: MCP stdio server wired, 8 tools registered, canonical models
 - Phase 2: `list_changes` returns real uncommitted changes (staged + unstaged) parsed from `git diff`
-- Phase 3: `group_changes` uses embeddings + cosine-similarity clustering to group changes by intent
 - Tier 1 read-only tools: `repo_status`, `log`, `show_commit`, `diff_between_refs`, `blame`
-- Downstream consumers: `propose_commits` (deterministic heuristic), `apply_commit` (real git mutation with safety guardrails), `generate_pr` (real PR draft from commit SHAs)
-- Content-derived stable IDs for groups and commits (SHA-256 hashed from membership)
-- Shared `embedAndCluster()` pipeline (single source of truth for group computation)
+- Repo selection: `set_repo_root` / `get_repo_root` — all tools require explicit repo selection (no implicit `process.cwd()`)
+- Safety caps: arrays capped at 200 entries with `truncated`/`omitted_count` fields
 
 Planned phases (do NOT start unless explicitly instructed):
 
 | Phase | Scope |
 |---|---|
-| Post-v0.1 | LLM-powered group summaries and commit messages (replace heuristics) |
 | Tier 1 expansion | `list_branches`, `list_tags`, `list_remotes` |
 | Tier 2 | Workspace mutation tools with guardrails (`stage_changes`, `unstage_changes`, etc.) |
 
@@ -76,8 +63,7 @@ They exist only as references for MCP behavior. If something in them seems wrong
 
 1. `src/index.ts` is the MCP server entrypoint. `src/server.ts` holds the `createServer()` factory with all tool registrations. This separation enables in-process testing.
 2. All git subprocess calls go through `src/exec-git.ts` (`execGit` for throwing, `tryExecGit` for non-throwing).
-3. Git mutation may ONLY occur inside MCP tool handlers. Never directly in agents.
-3. Agents reason over structured objects (Change, ChangeGroup, CommitPlan, PullRequestDraft). Never raw git output.
+3. Agents reason over structured objects (Change, LogCommit, CommitDetail, RepoStatus, BlameResult). Never raw git output.
 4. stdout is reserved for MCP JSON-RPC. All logging goes to stderr via `console.error`.
 5. No god files. Keep modules small and focused.
 6. No speculative abstractions. Only build what is explicitly required.
@@ -87,14 +73,10 @@ They exist only as references for MCP behavior. If something in them seems wrong
 Defined in `src/models.ts`. These are the canonical shapes:
 
 - **Change** — a single file's diff: `{ id, file_path, hunks[] }`
-- **ChangeGroup** — related changes clustered by intent: `{ id, change_ids[], summary }`
-- **CommitPlan** — a proposed commit: `{ id, title, description, change_group_ids[] }`
-- **PullRequestDraft** — a PR covering multiple commits: `{ title, description, commits[] }`
-- **ApplyCommitResult** — result of applying a commit: `{ success, dry_run, commit_sha?, committed_paths[], message }`
-- **LogCommit** — a single commit from history (Tier 1): `{ sha, short_sha, subject, author_name, author_email, author_date, parents[] }`
-- **CommitDetail** — full commit details (Tier 1): `{ sha, short_sha, subject, body, author_name, author_email, author_date, committer_name, committer_email, committer_date, parents[], files[], diff: { changes: Change[] } }`
-- **RepoStatus** — structured repo state snapshot (Tier 1): `{ is_git_repo, root_path, head, staged[], unstaged[], untracked[], ahead_by?, behind_by?, upstream?, merge_in_progress, rebase_in_progress }`
-- **BlameResult** — line-level blame output (Tier 1): `{ path, ref, lines: BlameLine[] }`
+- **LogCommit** — a single commit from history: `{ sha, short_sha, subject, author_name, author_email, author_date, parents[] }`
+- **CommitDetail** — full commit details: `{ sha, short_sha, subject, body, author_name, author_email, author_date, committer_name, committer_email, committer_date, parents[], files[], diff: { changes: Change[] } }`
+- **RepoStatus** — structured repo state snapshot: `{ is_git_repo, root_path, head, staged[], unstaged[], untracked[], ahead_by?, behind_by?, upstream?, merge_in_progress, rebase_in_progress }`
+- **BlameResult** — line-level blame output: `{ path, ref, lines: BlameLine[] }`
 - **BlameLine** — a single blamed line: `{ line_number, content, commit: BlameCommit }`
 - **BlameCommit** — blame commit metadata: `{ sha, short_sha, author_name, author_email, author_time, summary }`
 
@@ -104,16 +86,16 @@ These names and signatures are canonical. Do not rename or change contracts with
 
 | Tool | Tier | Input | Output | Description |
 |---|---|---|---|---|
+| `set_repo_root` | 1 | `{ path: string }` | `{ repo_root: string }` | Select the repository Segmint operates on |
+| `get_repo_root` | 1 | `{}` | `{ repo_root: string \| null }` | Return the currently configured repository root |
 | `repo_status` | 1 | `{}` | `RepoStatus` | Structured repository state |
 | `list_changes` | 1 | `{}` | `{ changes: Change[] }` | List uncommitted changes as structured objects |
 | `log` | 1 | `{ limit?, ref?, path?, since?, until?, include_merges? }` | `{ commits: LogCommit[] }` | Structured commit history with filtering |
 | `show_commit` | 1 | `{ sha: string }` | `{ commit: CommitDetail }` | Full commit details with metadata, files, and diff |
 | `diff_between_refs` | 1 | `{ base, head, path?, unified? }` | `{ base, head, changes: Change[] }` | Structured diff between any two refs |
 | `blame` | 1 | `{ path, ref?, start_line?, end_line?, ignore_whitespace?, detect_moves? }` | `BlameResult` | Line-level attribution for a file |
-| `group_changes` | — | `{ change_ids: string[] }` | `{ groups: ChangeGroup[] }` | Group changes by intent (content-derived stable IDs) |
-| `propose_commits` | — | `{ group_ids: string[] }` | `{ commits: CommitPlan[] }` | Deterministic commit planning from groups |
-| `apply_commit` | — | `{ commit_id, confirm, dry_run?, expected_head_sha?, message_override?, allow_staged? }` | `ApplyCommitResult` | Stage + commit with safety guardrails |
-| `generate_pr` | — | `{ commit_shas: string[] }` | `PullRequestDraft` | Generate PR draft from real commit SHAs (hex format) |
+
+All tools require `set_repo_root` to be called first (except `set_repo_root` and `get_repo_root` themselves). Tools return `SEGMINT_NO_REPO` error if no repository has been selected.
 
 All tools return both `content` (text JSON) and `structuredContent` (typed object).
 
@@ -123,8 +105,9 @@ All tools must follow these conventions:
 
 - Validate inputs with Zod schemas (handled automatically by the SDK).
 - Return `{ isError: true }` with a descriptive message for unknown IDs or invalid references. Do not throw exceptions.
+- All git-touching tools must call `requireRepoRoot()` before any operation. If no repo has been selected via `set_repo_root`, return `{ isError: true }` with the `SEGMINT_NO_REPO` error message.
 - Never crash the MCP server on bad user input. All errors must be returned as structured MCP responses.
-- Error messages must be deterministic and machine-readable (e.g., `"Unknown change IDs: bad-id"`).
+- Error messages must be deterministic and machine-readable (e.g., `"SEGMINT_NO_REPO: ..."`).
 - Do not use `try/catch` to swallow errors silently. If something unexpected happens, return it as an MCP error.
 
 ## Directory Structure
@@ -132,16 +115,10 @@ All tools must follow these conventions:
 ```
 src/
   index.ts        — MCP server entrypoint (slim — imports createServer, connects stdio)
-  server.ts       — createServer() factory with all 10 tool registrations
+  server.ts       — createServer() factory with all 8 tool registrations + repo_root state
   exec-git.ts     — Centralized git command execution + error handling
   models.ts       — TypeScript interfaces for data models
   git.ts          — Git diff execution and unified diff parsing
-  changes.ts      — Shared change-loading, ID resolution, embedding text, embedAndCluster, computeGroups, contentHash
-  embeddings.ts   — Pluggable EmbeddingProvider interface + OpenAI/Local implementations
-  cluster.ts      — Cosine similarity + centroid-based greedy clustering
-  propose.ts      — Deterministic commit planning from ChangeGroups (downstream consumer)
-  apply.ts        — Real git staging + commit with safety guardrails (downstream consumer)
-  generate-pr.ts  — PR draft generation from real commit SHAs (downstream consumer)
   history.ts      — Commit history retrieval (Tier 1 read-only)
   show.ts         — Single commit detail retrieval (Tier 1 read-only)
   diff.ts         — Ref-to-ref structured diff (Tier 1 read-only)
@@ -186,10 +163,7 @@ Dev dependencies:
 
 ## Environment Variables
 
-| Variable | Required by | Description |
-|---|---|---|
-| `OPENAI_API_KEY` | `group_changes`, `propose_commits`, `apply_commit` | OpenAI API key for text-embedding-3-small. If not set, embedding-dependent tools return a structured error. |
-| `SEGMINT_EMBEDDING_PROVIDER` | optional | Set to `"local"` to use the offline SHA-256-based LocalEmbeddingProvider instead of OpenAI. Used by tests and development. |
+No environment variables are required. Segmint is fully deterministic with no external API dependencies.
 
 ## Build and Run
 
@@ -211,7 +185,7 @@ npm run test:coverage # All tests with coverage report
 npm run test:watch    # Watch mode
 ```
 
-All tests run fully offline with `SEGMINT_EMBEDDING_PROVIDER=local` (set automatically in CI).
+All tests run fully offline with no external dependencies.
 
 ## Testing Requirements
 
@@ -240,13 +214,13 @@ Send these messages over stdin (each on its own line):
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0.0"}}}
 {"jsonrpc":"2.0","method":"notifications/initialized"}
 {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
-{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"repo_status","arguments":{}}}
-{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"list_changes","arguments":{}}}
-{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"log","arguments":{"limit":5}}}
-{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"show_commit","arguments":{"sha":"HEAD"}}}
-{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"diff_between_refs","arguments":{"base":"HEAD~1","head":"HEAD"}}}
-{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"blame","arguments":{"path":"src/index.ts"}}}
-{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"group_changes","arguments":{"change_ids":["change-1","change-2"]}}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"set_repo_root","arguments":{"path":"/path/to/your/repo"}}}
+{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"repo_status","arguments":{}}}
+{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"list_changes","arguments":{}}}
+{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"log","arguments":{"limit":5}}}
+{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"show_commit","arguments":{"sha":"HEAD"}}}
+{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"diff_between_refs","arguments":{"base":"HEAD~1","head":"HEAD"}}}
+{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"blame","arguments":{"path":"src/index.ts"}}}
 ```
 
 ## Coding Standards
@@ -312,13 +286,13 @@ Send these messages over stdin (each on its own line):
 
 ## Anti-Drift Contract: Substrate Tiers
 
-> These rules exist to prevent Segmint from drifting into "commit assistant" or "PR generator" territory. Every future agent must follow them.
+> These rules exist to prevent Segmint from drifting beyond its role as read-only Git infrastructure. Every future agent must follow them.
 
 ### Tier classification
 
 All tools belong to a tier. The tiers are:
 
-- **Tier 1 (read-only):** Safe, foundational tools that inspect repo state without mutation. Examples: `repo_status`, `log`, `show_commit`, `diff`, `blame`, `list_branches`, `list_tags`, `list_remotes`.
+- **Tier 1 (read-only):** Safe, foundational tools that inspect repo state without mutation. Examples: `repo_status`, `log`, `show_commit`, `diff`, `blame`, `list_branches`, `list_tags`, `list_remotes`. All current tools are Tier 1.
 - **Tier 2 (workspace mutation):** Controlled, reversible tools that change working tree or index. Examples: `stage_changes`, `unstage_changes`, `apply_patch`, `checkout_branch`, `stash_save`, `reset_soft`. All Tier 2 tools must include explicit safety guardrails.
 - **Tier 3 (irreversible/destructive):** `push`, `rebase`, `reset --hard`, force operations. Gated behind safety/preview mechanisms. Not a near-term priority.
 
@@ -326,10 +300,9 @@ All tools belong to a tier. The tiers are:
 
 1. **Tier mapping required.** Every plan to implement a new tool must explicitly state which tier the tool belongs to before implementation begins. No tool is implemented without a tier assignment.
 2. **Capability naming.** Tool names and descriptions must reflect Git capabilities (e.g., `repo_status`, `stage_hunks`, `blame`). Names must never reflect assistant workflows (e.g., `plan_my_commits`, `help_with_pr`, `suggest_changes`).
-3. **Downstream positioning.** Any plan proposing commit planner, PR generator, or workflow automation features must position them as downstream consumers of Tier 1/2 primitives. They must not be framed as core substrate tools.
-4. **Roadmap updates mandatory.** Every PR or task that adds, removes, or changes tool capabilities MUST update the Capability Roadmap section in README.md in the same change.
-5. **Substrate independence.** Tier 1 and Tier 2 tools must be independently useful without commit/PR features. The substrate must never depend on downstream consumers.
-6. **No premature implementation.** Do NOT implement new Tier 1, Tier 2, or Tier 3 tools unless the user has explicitly instructed you to do so. Planning and documenting future tools is fine; writing code for them is not.
+3. **Roadmap updates mandatory.** Every PR or task that adds, removes, or changes tool capabilities MUST update the Capability Roadmap section in README.md in the same change.
+4. **Substrate independence.** Tier 1 and Tier 2 tools must be independently useful. The substrate must never depend on higher-level workflow features.
+5. **No premature implementation.** Do NOT implement new Tier 1, Tier 2, or Tier 3 tools unless the user has explicitly instructed you to do so. Planning and documenting future tools is fine; writing code for them is not.
 
 ## Planning Checklist (New Tools)
 

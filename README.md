@@ -2,9 +2,7 @@
 
 A semantic Git runtime for AI agents.
 
-Segmint is an MCP server that turns raw `git diff` output into structured, agent-readable objects. It parses diffs into typed Changes, clusters related edits by semantic similarity, and exposes everything through the Model Context Protocol so any MCP-compatible agent can inspect and manipulate repository state.
-
-Commit planning, PR generation, and other downstream workflows are optional consumers of this substrate — not the core product.
+Segmint is an MCP server that turns raw `git diff` output into structured, agent-readable objects. It parses diffs into typed Changes, exposes structured commit history, blame, status, and ref-to-ref diffs through the Model Context Protocol so any MCP-compatible agent can inspect repository state.
 
 ## Core Primitives
 
@@ -14,42 +12,50 @@ Segmint models a repository as a set of structured objects that agents operate o
 |---|---|
 | **Change** | A single file's diff — file path and typed hunks |
 | **Hunk** | A contiguous region of changed lines within a file |
-| **ChangeGroup** | A cluster of semantically related changes |
-| **CommitPlan** | A proposed commit covering one or more groups |
-| **PullRequestDraft** | A PR covering multiple commits |
 
-Change and Hunk are the foundational layer. Everything else is built on top.
+Change and Hunk are the foundational layer. All other structures (LogCommit, CommitDetail, RepoStatus, BlameResult) are read-only views over repository state.
 
 ## How It Works
 
 ```
-git diff ──► Change[] ──► embeddings ──► clustering ──► ChangeGroup[]
-                                                            │
-                                              (optional downstream)
-                                                            ▼
-                                                     CommitPlan[] ──► PullRequestDraft
+git ──► structured objects ──► agent
 ```
 
-Segmint runs as a stdio-based MCP server. An AI agent connects over stdin/stdout using JSON-RPC, calls tools to read structured diffs, group related changes, and optionally plan commits or generate PRs.
+Segmint runs as a stdio-based MCP server. An AI agent connects over stdin/stdout using JSON-RPC and calls tools to read structured diffs, commit history, blame data, repository status, and ref-to-ref diffs.
 
-**What is mechanical (no LLM):** diff parsing, Change construction, embedding text assembly, cosine similarity, clustering, deterministic ID assignment.
-
-**What uses LLMs:** embedding vectors (OpenAI `text-embedding-3-small`). Group summaries, commit messages, and PR descriptions are currently heuristic — LLM integration is planned.
+**Everything is mechanical (no LLM):** diff parsing, Change construction, commit history retrieval, blame attribution, status gathering, deterministic ID assignment.
 
 ## MCP Tools
 
-| Tool | Tier | Status | Description |
-|---|---|---|---|
-| `repo_status` | 1 | Real | Structured repository state — HEAD, staged/unstaged/untracked, ahead/behind, merge/rebase |
-| `list_changes` | 1 | Real | Parse uncommitted diffs into structured `Change[]` objects |
-| `log` | 1 | Real | Structured commit history with ref, path, date, and merge filtering |
-| `show_commit` | 1 | Real | Full commit details — metadata, affected files, and structured diff |
-| `diff_between_refs` | 1 | Real | Structured diff between any two refs with optional path filtering |
-| `blame` | 1 | Real | Line-level attribution — commit SHA, author, timestamp, summary per line |
-| `group_changes` | — | Real | Cluster changes by semantic similarity into `ChangeGroup[]` (content-derived stable IDs) |
-| `propose_commits` | — | Real | Deterministic commit planning from change groups |
-| `apply_commit` | — | Real | Stage and commit files with safety guardrails (confirm, dry_run, expected_head_sha) |
-| `generate_pr` | — | Real | Generate a pull request draft from real commit SHAs |
+| Tool | Tier | Description |
+|---|---|---|
+| `set_repo_root` | 1 | Select the repository Segmint operates on (resolves to absolute path, verifies git work tree) |
+| `get_repo_root` | 1 | Return the currently configured repository root, or null |
+| `repo_status` | 1 | Structured repository state — HEAD, staged/unstaged/untracked, ahead/behind, merge/rebase |
+| `list_changes` | 1 | Parse uncommitted diffs into structured `Change[]` objects |
+| `log` | 1 | Structured commit history with ref, path, date, and merge filtering |
+| `show_commit` | 1 | Full commit details — metadata, affected files, and structured diff |
+| `diff_between_refs` | 1 | Structured diff between any two refs with optional path filtering |
+| `blame` | 1 | Line-level attribution — commit SHA, author, timestamp, summary per line |
+
+All tools require `set_repo_root` to be called first (except `set_repo_root` and `get_repo_root` themselves). Tools return a `SEGMINT_NO_REPO` error if no repository has been selected. Arrays returned by `repo_status` and `list_changes` are capped at 200 entries with `truncated` and `omitted_count` fields when exceeded.
+
+### set_repo_root
+
+Selects the repository Segmint operates on.
+
+- Input: `{ path: string }` — absolute or relative path to a directory inside a git repository
+- Resolves the path to an absolute directory, then runs `git rev-parse --show-toplevel` to find and store the repository root
+- Must be called before any other git-touching tool
+- If the path is not inside a git work tree, returns `{ isError: true }` and preserves the previous root (if any)
+- Calling again switches to a different repository
+
+### get_repo_root
+
+Returns the currently configured repository root, or null if none has been set.
+
+- Input: `{}`
+- Returns `{ repo_root: string | null }`
 
 ### repo_status
 
@@ -121,51 +127,6 @@ Returns line-level attribution for a file, showing which commit last modified ea
 - Timestamps are ISO 8601
 - Returns `{ isError: true }` for invalid paths, bad refs, or non-git directories
 
-### group_changes
-
-Clusters changes by semantic similarity using embeddings.
-
-- Input: `{ change_ids: string[] }` — IDs from `list_changes`
-- Validates IDs against current repository state
-- Builds embedding text from file path + hunk headers + diff lines
-- Calls OpenAI `text-embedding-3-small` for vector embeddings
-- Clusters using centroid-based greedy cosine similarity (threshold 0.80)
-- Single-change input skips embeddings and returns one group directly
-- Requires `OPENAI_API_KEY` (returns structured error if missing)
-
-### propose_commits
-
-Proposes a sequence of commits from change groups.
-
-- Input: `{ group_ids: string[] }` — IDs from `group_changes`
-- Recomputes all groups from current repo state (stateless)
-- Validates group IDs against computed groups (content-derived stable IDs)
-- Returns one `CommitPlan` per group with heuristic titles from file paths
-- Commit IDs are content-derived (stable across calls with same membership)
-
-### apply_commit
-
-Stages and commits files for a proposed commit plan.
-
-- Input: `{ commit_id, confirm, dry_run?, expected_head_sha?, message_override?, allow_staged? }`
-- **Safety guardrails:**
-  - `confirm: true` required — safety gate
-  - `dry_run: true` (default) — preview without mutation
-  - `expected_head_sha` — optimistic concurrency guard
-  - `allow_staged: false` (default) — fails if staged changes exist outside scope
-  - Fails during merge/rebase conflicts
-- Recomputes pipeline to find matching commit plan by stable ID
-- Returns `ApplyCommitResult` with committed paths, message, and (if real commit) SHA
-
-### generate_pr
-
-Generates a PR draft from real commit SHAs.
-
-- Input: `{ commit_shas: string[] }` — hex format, 4+ chars
-- Validates SHA format (hex only, no symbolic refs)
-- Uses `git show` to retrieve commit metadata and file lists
-- Returns `PullRequestDraft` with markdown description, commit list, and files changed
-
 ## Architecture
 
 ### MCP Server Model
@@ -191,21 +152,6 @@ All models are defined in `src/models.ts`.
 **Hunk** — a contiguous region of changed lines within a file.
 ```
 { old_start, old_lines, new_start, new_lines, header: string, lines: string[] }
-```
-
-**ChangeGroup** — a cluster of related changes grouped by semantic similarity.
-```
-{ id: string, change_ids: string[], summary: string }
-```
-
-**CommitPlan** — a proposed commit covering one or more change groups.
-```
-{ id: string, title: string, description: string, change_group_ids: string[] }
-```
-
-**PullRequestDraft** — a PR covering multiple commits.
-```
-{ title: string, description: string, commits: CommitPlan[] }
 ```
 
 **LogCommit** — a single commit from history (Tier 1).
@@ -243,12 +189,6 @@ All models are defined in `src/models.ts`.
 { sha, short_sha, author_name, author_email, author_time, summary }
 ```
 
-**ApplyCommitResult** — result of applying a commit plan.
-```
-{ success: boolean, dry_run: boolean, commit_sha?: string,
-  committed_paths: string[], message: string }
-```
-
 ### Pipeline Status
 
 | Stage | Status | Implementation |
@@ -260,32 +200,16 @@ All models are defined in `src/models.ts`.
 | Line-level blame | Real | `git blame --line-porcelain` with line range, whitespace, and move detection |
 | `git diff` parsing | Real | Runs `git diff` and `git diff --cached`, merges staged + unstaged per file |
 | Change ID assignment | Real | Sorted by file path, assigned as `change-1`, `change-2`, ... |
-| Embedding text | Real | Built from file path + hunk headers + diff lines (truncated at 200 lines) |
-| Embedding vectors | Real | OpenAI `text-embedding-3-small` via pluggable `EmbeddingProvider` |
-| Clustering | Real | Centroid-based greedy cosine similarity (threshold 0.80) |
-| Group summaries | Heuristic | File-path-based summaries (LLM summaries planned) |
-| Commit planning | Real (heuristic) | Deterministic 1:1 group→commit mapping with file-path-based titles |
-| Commit execution | Real | Real `git add` + `git commit` with safety guardrails (confirm, dry_run, expected_head_sha) |
-| PR generation | Real | Draft from real commit SHAs via `git show` metadata |
 
 ## Directory Structure
 
 ```
 src/
   index.ts        MCP server entrypoint (slim — imports createServer, connects stdio).
-  server.ts       createServer() factory with all 10 tool registrations.
+  server.ts       createServer() factory with all 8 tool registrations + repo_root state.
   exec-git.ts     Centralized git command execution + error handling.
   models.ts       TypeScript interfaces for all data models (Change, RepoStatus, etc.).
   git.ts          Executes git diff commands, parses unified diff format into Change objects.
-  changes.ts      Shared change-loading, ID resolution, embedding text, embedAndCluster,
-                  computeGroups, and contentHash. Single source of truth for change and
-                  group computation.
-  embeddings.ts   Pluggable EmbeddingProvider interface. Ships with OpenAI and Local
-                  (SHA-256-based offline) implementations.
-  cluster.ts      Cosine similarity function and centroid-based greedy clustering algorithm.
-  propose.ts      Deterministic commit planning from ChangeGroups (downstream consumer).
-  apply.ts        Real git staging + commit with safety guardrails (downstream consumer).
-  generate-pr.ts  PR draft generation from real commit SHAs (downstream consumer).
   history.ts      Commit history retrieval — Tier 1 read-only, NUL-delimited parsing.
   show.ts         Single commit detail retrieval — Tier 1 read-only, reuses parseDiff.
   diff.ts         Ref-to-ref structured diff — Tier 1 read-only, reuses parseDiff.
@@ -305,31 +229,11 @@ typescript-sdk/   Local copy of the MCP TypeScript SDK (read-only reference).
 llms-full.txt     MCP protocol documentation (read-only reference).
 build/            Compiled JavaScript output (gitignored).
 .github/workflows/ CI configuration (GitHub Actions).
-.env.example      Environment variable template (copy to .env).
 ```
 
 ## Configuration
 
-Segmint uses environment variables for runtime configuration. A `.env.example` template is provided at the repository root — copy it to `.env` and fill in values as needed. `.env` is gitignored and will not be committed.
-
-| Variable | Required | Description |
-|---|---|---|
-| `OPENAI_API_KEY` | Yes (for `group_changes` with 2+ changes) | OpenAI API key for `text-embedding-3-small`. If not set, `group_changes` returns a structured MCP error with setup instructions. Single-change calls work without it. |
-| `SEGMINT_EMBEDDING_PROVIDER` | No | Set to `"local"` to use the offline SHA-256-based `LocalEmbeddingProvider` instead of OpenAI. No API key needed. Used for testing and development. |
-
-### Setting environment variables
-
-```bash
-# Linux/macOS — set in current shell
-export OPENAI_API_KEY=sk-...
-export SEGMINT_EMBEDDING_PROVIDER=local
-
-# Windows PowerShell — set in current session
-$env:OPENAI_API_KEY = "sk-..."
-$env:SEGMINT_EMBEDDING_PROVIDER = "local"
-```
-
-Or copy `.env.example` to `.env` and edit it — the server reads from the process environment, so set variables before starting.
+No environment variables are required. Segmint operates entirely offline using only the local `git` CLI. There are no LLM dependencies or external API calls.
 
 ## Running Locally
 
@@ -342,6 +246,29 @@ npm run build
 
 The `build` script runs `npm run clean && tsc`, which removes stale artifacts from `build/` before compiling. This prevents leftover files from deleted source modules.
 
+### Use with Claude Desktop
+
+Add Segmint to your Claude Desktop configuration (`%APPDATA%\Claude\claude_desktop_config.json` on Windows, `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
+
+```json
+{
+  "mcpServers": {
+    "segmint": {
+      "command": "node",
+      "args": ["C:/path/to/segmint/build/index.js"]
+    }
+  }
+}
+```
+
+No `cwd` field is needed — the agent selects the target repository at runtime by calling `set_repo_root`.
+
+### Agent workflow
+
+1. Agent connects and calls `set_repo_root` with the target repository path.
+2. Agent calls any combination of tools (`repo_status`, `list_changes`, `log`, etc.).
+3. To switch repositories, call `set_repo_root` again with a different path.
+
 ### Test with JSON-RPC over stdio
 
 The server communicates via stdin/stdout using JSON-RPC. Send one message per line:
@@ -350,13 +277,13 @@ The server communicates via stdin/stdout using JSON-RPC. Send one message per li
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0.0"}}}
 {"jsonrpc":"2.0","method":"notifications/initialized"}
 {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
-{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"repo_status","arguments":{}}}
-{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"list_changes","arguments":{}}}
-{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"log","arguments":{"limit":5}}}
-{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"show_commit","arguments":{"sha":"HEAD"}}}
-{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"diff_between_refs","arguments":{"base":"HEAD~1","head":"HEAD"}}}
-{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"blame","arguments":{"path":"src/index.ts"}}}
-{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"group_changes","arguments":{"change_ids":["change-1","change-2"]}}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"set_repo_root","arguments":{"path":"/path/to/your/repo"}}}
+{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"repo_status","arguments":{}}}
+{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"list_changes","arguments":{}}}
+{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"log","arguments":{"limit":5}}}
+{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"show_commit","arguments":{"sha":"HEAD"}}}
+{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"diff_between_refs","arguments":{"base":"HEAD~1","head":"HEAD"}}}
+{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"blame","arguments":{"path":"src/index.ts"}}}
 ```
 
 Start the server and pipe input:
@@ -367,15 +294,13 @@ npm start
 
 ## Design Principles
 
-**Substrate, not application.** Segmint provides structured Git primitives for agents. Commit planning, PR generation, and workflow automation are downstream consumers — they use the substrate but do not define it.
+**Substrate, not application.** Segmint provides structured Git primitives for agents. Commit planning, PR generation, change grouping, and workflow automation are the responsibility of the consuming agent — they use the substrate but do not define it.
 
-**Determinism.** Changes are sorted by file path before ID assignment. Clustering processes inputs in sorted order. Group and commit IDs are content-derived (SHA-256 hash of sorted membership), making them stable across calls with the same underlying changes. Given the same diff and embeddings, the output is identical.
+**Determinism.** Changes are sorted by file path before ID assignment. Given the same diff, the output is identical.
 
 **MCP stdout hygiene.** stdout is reserved exclusively for JSON-RPC protocol messages. All diagnostic output goes to stderr via `console.error`. No banners, no startup messages on stdout.
 
-**Pluggable embeddings.** The `EmbeddingProvider` interface decouples clustering from any specific API. The default implementation calls OpenAI, but the interface can be swapped without touching clustering or tool logic.
-
-**Real data, no mocks.** All 10 MCP tools operate on real git data. Group summaries and commit titles use heuristics (LLM integration planned). No mock data in production code.
+**Real data, no mocks.** All 8 MCP tools operate on real git data. No mock data in production code.
 
 **No speculative abstraction.** Code is written for the current requirement. Helpers are introduced only when shared by multiple callers. Three similar lines are better than a premature abstraction.
 
@@ -391,11 +316,11 @@ The next major development focus is **Tier 1 + Tier 2**. These tiers define what
 
 Tools that let an agent understand repository state without mutating anything. These are the highest priority because they are safe, composable, and foundational for all downstream operations.
 
-- `repo_status` — staged/unstaged/untracked counts, current branch, ahead/behind remote ✅
-- `log` — commit history with filters (date range, path, ref, merge filtering, limit) ✅
-- `show_commit` — full commit details (message, author, diff) for a given SHA ✅
-- `diff_between_refs` — structured diff between any two refs (branches, commits, tags) with optional path filtering ✅
-- `blame` — line-level attribution for a file or line range ✅
+- `repo_status` — staged/unstaged/untracked counts, current branch, ahead/behind remote
+- `log` — commit history with filters (date range, path, ref, merge filtering, limit)
+- `show_commit` — full commit details (message, author, diff) for a given SHA
+- `diff_between_refs` — structured diff between any two refs (branches, commits, tags) with optional path filtering
+- `blame` — line-level attribution for a file or line range
 - `list_branches` / `list_tags` / `current_branch` — ref enumeration
 - `list_remotes` / `remote_info` — remote configuration
 
@@ -419,15 +344,13 @@ Operations like `push`, `rebase`, `reset --hard`, `force push`, and history rewr
 |---|---|---|
 | Phase 1 | Complete | MCP skeleton, tool registration |
 | Phase 2 | Complete | Real git diff parsing — structured Change objects |
-| Phase 3 | Complete | Embeddings + clustering — semantic ChangeGroups |
 | Tier 1 | Complete | Read-only repo intelligence tools (repo_status, log, show_commit, diff_between_refs, blame) |
-| Downstream | Complete | Real propose_commits, apply_commit, generate_pr (v0.1) |
+| v0.1.1 | Complete | Explicit repo selection (set_repo_root/get_repo_root), safety caps (200-entry arrays), SEGMINT_NO_REPO invariant, removal of downstream tools and embedding infrastructure |
 
 ### Post-v0.1 Roadmap
 
 | Priority | Scope |
 |---|---|
-| Next | LLM-powered group summaries and commit messages (replace heuristics) |
 | Next | Tier 1 expansion: `list_branches`, `list_tags`, `list_remotes` |
 | Later | Tier 2: workspace mutation tools with guardrails |
 | Later | Tier 3: irreversible operations with safety gating |
@@ -436,10 +359,10 @@ Operations like `push`, `rebase`, `reset --hard`, `force push`, and history rewr
 
 These are explicitly out of scope and must not drive substrate design:
 
-- **UX-layer commit/PR assistance.** Segmint is not building a user-facing commit planner or PR writing tool. `propose_commits` and `generate_pr` exist as optional downstream consumers of the substrate. They must not influence the design of Tier 1/2 primitives.
+- **Commit planning, PR generation, and change grouping.** These are the responsibility of the consuming agent, not Segmint. Segmint provides the structured data; the agent decides how to group changes, plan commits, and generate PRs using its own reasoning.
 - **Opinionated Git workflows.** Segmint does not enforce branching strategies, commit conventions, or merge policies. It exposes Git capabilities; agents decide how to use them.
 - **Interactive UIs or dashboards.** Segmint is a headless MCP server. Any UI is a separate concern built on top.
-- **Git hosting integration.** GitHub/GitLab/Bitbucket API wrappers are not part of the substrate. PR generation produces a local draft; pushing or creating remote PRs is a downstream operation.
+- **Git hosting integration.** GitHub/GitLab/Bitbucket API wrappers are not part of the substrate. Interacting with remote hosting platforms is a downstream operation.
 
 ## Development Rules
 
@@ -466,12 +389,7 @@ npm run test:coverage # All tests with V8 coverage report
 npm run test:watch    # Watch mode for development
 ```
 
-All tests run fully offline using `SEGMINT_EMBEDDING_PROVIDER=local`. No OpenAI API key is needed to run the test suite.
-
-| Embedding Provider | Env Variable | Use Case |
-|---|---|---|
-| `LocalEmbeddingProvider` | `SEGMINT_EMBEDDING_PROVIDER=local` | Testing, offline development |
-| `OpenAIEmbeddingProvider` | `OPENAI_API_KEY=sk-...` | Production, real semantic similarity |
+All tests run fully offline with no external dependencies.
 
 CI runs on both Ubuntu and Windows via GitHub Actions on every push and pull request.
 
