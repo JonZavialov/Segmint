@@ -20,20 +20,21 @@ import { execGit, compareAscii } from "./exec-git.js";
  *
  * @throws Error with descriptive message if sha is unknown, not a git repo, etc.
  */
-export function getCommit(sha: string): { commit: CommitDetail } {
+export function getCommit(sha: string, cwd?: string): { commit: CommitDetail } {
   // 1. Metadata via NUL-delimited format
   const metaRaw = execGit([
     "show", "-s",
     "--date=iso-strict",
     "--pretty=format:%H%x00%h%x00%s%x00%b%x00%an%x00%ae%x00%ad%x00%cn%x00%ce%x00%cd%x00%P",
     sha,
-  ]);
+  ], cwd);
 
   const meta = parseMetadata(metaRaw);
 
   // 2. Name-status for affected files
   const nameStatusRaw = execGit(
     ["show", "--name-status", "--pretty=format:", sha],
+    cwd,
   );
   const files = parseNameStatus(nameStatusRaw);
 
@@ -43,11 +44,13 @@ export function getCommit(sha: string): { commit: CommitDetail } {
     // Root commit: no parent to diff against, use git show for diff
     diffRaw = execGit(
       ["show", sha, "--no-color", "--unified=3", "--pretty=format:"],
+      cwd,
     );
   } else {
     // Normal commit: diff against parent(s)
     diffRaw = execGit(
       ["diff", `${sha}^!`, "--no-color", "--unified=3"],
+      cwd,
     );
   }
 

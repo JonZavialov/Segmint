@@ -25,7 +25,7 @@ export interface GetLogArgs {
  *
  * @throws Error with descriptive message if not a git repo, bad ref, or bad path
  */
-export function getLog(args: GetLogArgs): { commits: LogCommit[] } {
+export function getLog(args: GetLogArgs, cwd?: string): { commits: LogCommit[] } {
   const ref = args.ref ?? "HEAD";
 
   // Clamp limit to 1..200, default 20
@@ -58,7 +58,7 @@ export function getLog(args: GetLogArgs): { commits: LogCommit[] } {
     argv.push("--", args.path);
   }
 
-  const raw = execGit(argv);
+  const raw = execGit(argv, cwd);
   const commits = parseLogOutput(raw);
   return { commits };
 }

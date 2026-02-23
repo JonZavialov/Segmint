@@ -22,7 +22,7 @@ export interface DiffBetweenRefsArgs {
  *
  * @throws Error with descriptive message if refs are invalid, not a git repo, etc.
  */
-export function getDiffBetweenRefs(args: DiffBetweenRefsArgs): Change[] {
+export function getDiffBetweenRefs(args: DiffBetweenRefsArgs, cwd?: string): Change[] {
   // Clamp unified context lines to 0..20, default 3
   let unified = args.unified ?? 3;
   if (unified < 0) unified = 0;
@@ -40,7 +40,7 @@ export function getDiffBetweenRefs(args: DiffBetweenRefsArgs): Change[] {
     argv.push("--", args.path);
   }
 
-  const raw = execGit(argv);
+  const raw = execGit(argv, cwd);
   const parsed = parseDiff(raw);
 
   // Sort by file_path for deterministic IDs (scoped to this output)

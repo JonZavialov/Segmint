@@ -6,17 +6,16 @@
  * a child process — tests import createServer() directly.
  */
 
+import { resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { loadChanges, resolveChangeIds, embedAndCluster } from "./changes.js";
-import { proposeCommits } from "./propose.js";
-import { applyCommit } from "./apply.js";
-import { generatePr } from "./generate-pr.js";
+import { getUncommittedChanges } from "./git.js";
 import { getRepoStatus } from "./status.js";
 import { getLog } from "./history.js";
 import { getCommit } from "./show.js";
 import { getDiffBetweenRefs } from "./diff.js";
 import { getBlame } from "./blame.js";
+import { execGit } from "./exec-git.js";
 
 // ---------------------------------------------------------------------------
 // Shared schemas
@@ -38,20 +37,141 @@ const changeSchema = z.object({
 });
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/** Hard cap on array entries returned by any tool. */
+const MAX_ARRAY_ENTRIES = 200;
+
+/** Error code returned when no repo root has been configured. */
+const SEGMINT_NO_REPO =
+  "SEGMINT_NO_REPO: No repository selected. Call set_repo_root first.";
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Cap an array at MAX_ARRAY_ENTRIES. Returns the truncated array and
+ * the number of omitted entries.
+ */
+function capArray<T>(arr: T[]): { items: T[]; truncated: boolean; omitted_count: number } {
+  if (arr.length <= MAX_ARRAY_ENTRIES) {
+    return { items: arr, truncated: false, omitted_count: 0 };
+  }
+  return {
+    items: arr.slice(0, MAX_ARRAY_ENTRIES),
+    truncated: true,
+    omitted_count: arr.length - MAX_ARRAY_ENTRIES,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
 
 /**
  * Create a fully-configured Segmint MCP server.
  *
- * The returned server has all 10 tools registered and is ready to be
+ * The returned server has all 8 tools registered and is ready to be
  * connected to any MCP transport (stdio, in-memory, etc.).
+ *
+ * Repo root is stored as server-instance state inside the closure.
+ * All tools that touch git use this root (returned by getRepoRoot()).
  */
 export function createServer(): McpServer {
   const server = new McpServer({
     name: "segmint",
-    version: "0.1.0",
+    version: "0.1.1",
   });
+
+  // -----------------------------------------------------------------------
+  // Server-instance state: configured repository root
+  // -----------------------------------------------------------------------
+  let repoRoot: string | null = null;
+
+  /** Return the configured repo root or null. */
+  function getRepoRoot(): string | null {
+    return repoRoot;
+  }
+
+  /**
+   * Return the configured repo root or throw SEGMINT_NO_REPO.
+   * All git-touching handlers call this to enforce the invariant.
+   */
+  function requireRepoRoot(): string {
+    if (repoRoot === null) {
+      throw new Error(SEGMINT_NO_REPO);
+    }
+    return repoRoot;
+  }
+
+  // -------------------------------------------------------------------------
+  // Tool: set_repo_root (Tier 1 — configuration)
+  // -------------------------------------------------------------------------
+
+  server.registerTool(
+    "set_repo_root",
+    {
+      description:
+        "Select the repository Segmint operates on. Resolves the path to an absolute directory, verifies it is inside a git work tree, and stores the resolved repo root for all subsequent tool calls.",
+      inputSchema: z.object({
+        path: z.string().describe(
+          "Absolute or relative path to a directory inside the target repository"
+        ),
+      }),
+      outputSchema: z.object({
+        repo_root: z.string(),
+      }),
+    },
+    async ({ path: inputPath }, _extra) => {
+      try {
+        const absPath = resolve(inputPath);
+
+        // Verify it is a git repo by asking git for the toplevel
+        const toplevel = execGit(
+          ["rev-parse", "--show-toplevel"],
+          absPath,
+        ).trim();
+
+        repoRoot = toplevel;
+
+        return {
+          content: [{ type: "text", text: JSON.stringify({ repo_root: toplevel }, null, 2) }],
+          structuredContent: { repo_root: toplevel },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          content: [{ type: "text", text: message }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // -------------------------------------------------------------------------
+  // Tool: get_repo_root (Tier 1 — configuration)
+  // -------------------------------------------------------------------------
+
+  server.registerTool(
+    "get_repo_root",
+    {
+      description:
+        "Return the currently configured repository root, or null if none has been set.",
+      inputSchema: z.object({}),
+      outputSchema: z.object({
+        repo_root: z.string().nullable(),
+      }),
+    },
+    async (_args, _extra) => {
+      const root = getRepoRoot();
+      return {
+        content: [{ type: "text", text: JSON.stringify({ repo_root: root }, null, 2) }],
+        structuredContent: { repo_root: root },
+      };
+    }
+  );
 
   // -------------------------------------------------------------------------
   // Tool: list_changes
@@ -71,12 +191,20 @@ export function createServer(): McpServer {
             hunks: z.array(hunkSchema),
           })
         ),
+        truncated: z.boolean().optional(),
+        omitted_count: z.number().optional(),
       }),
     },
     async (_args, _extra) => {
       try {
-        const changes = loadChanges();
-        const result = { changes };
+        const cwd = requireRepoRoot();
+        const allChanges = getUncommittedChanges(cwd);
+        const { items, truncated, omitted_count } = capArray(allChanges);
+        const result: Record<string, unknown> = { changes: items };
+        if (truncated) {
+          result.truncated = true;
+          result.omitted_count = omitted_count;
+        }
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
           structuredContent: result,
@@ -117,14 +245,32 @@ export function createServer(): McpServer {
         upstream: z.string().optional(),
         merge_in_progress: z.boolean(),
         rebase_in_progress: z.boolean(),
+        truncated: z.boolean().optional(),
       }),
     },
     async (_args, _extra) => {
       try {
-        const status = getRepoStatus();
+        const cwd = requireRepoRoot();
+        const status = getRepoStatus(cwd);
+
+        // Cap arrays
+        const stagedCap = capArray(status.staged);
+        const unstagedCap = capArray(status.unstaged);
+        const untrackedCap = capArray(status.untracked);
+        const truncated =
+          stagedCap.truncated || unstagedCap.truncated || untrackedCap.truncated;
+
+        const result: Record<string, unknown> = {
+          ...status,
+          staged: stagedCap.items,
+          unstaged: unstagedCap.items,
+          untracked: untrackedCap.items,
+        };
+        if (truncated) result.truncated = true;
+
         return {
-          content: [{ type: "text", text: JSON.stringify(status, null, 2) }],
-          structuredContent: { ...status },
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          structuredContent: result,
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -187,7 +333,8 @@ export function createServer(): McpServer {
     },
     async (args, _extra) => {
       try {
-        const result = getLog(args);
+        const cwd = requireRepoRoot();
+        const result = getLog(args, cwd);
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
           structuredContent: result,
@@ -236,7 +383,8 @@ export function createServer(): McpServer {
     },
     async ({ sha }, _extra) => {
       try {
-        const result = getCommit(sha);
+        const cwd = requireRepoRoot();
+        const result = getCommit(sha, cwd);
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
           structuredContent: {
@@ -291,7 +439,8 @@ export function createServer(): McpServer {
     },
     async ({ base, head, path, unified }, _extra) => {
       try {
-        const changes = getDiffBetweenRefs({ base, head, path, unified });
+        const cwd = requireRepoRoot();
+        const changes = getDiffBetweenRefs({ base, head, path, unified }, cwd);
         const result = { base, head, changes };
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
@@ -367,7 +516,8 @@ export function createServer(): McpServer {
     },
     async ({ path, ref, start_line, end_line, ignore_whitespace, detect_moves }, _extra) => {
       try {
-        const result = getBlame({ path, ref, start_line, end_line, ignore_whitespace, detect_moves });
+        const cwd = requireRepoRoot();
+        const result = getBlame({ path, ref, start_line, end_line, ignore_whitespace, detect_moves }, cwd);
         return {
           content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
           structuredContent: {
@@ -378,210 +528,6 @@ export function createServer(): McpServer {
               content: l.content,
               commit: { ...l.commit },
             })),
-          },
-        };
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        return {
-          content: [{ type: "text", text: message }],
-          isError: true,
-        };
-      }
-    }
-  );
-
-  // -------------------------------------------------------------------------
-  // Tool: group_changes
-  // -------------------------------------------------------------------------
-
-  server.registerTool(
-    "group_changes",
-    {
-      description:
-        "Group a set of changes by intent. Accepts change IDs and returns ChangeGroups, each with a summary describing the purpose of the grouped edits.",
-      inputSchema: z.object({
-        change_ids: z
-          .array(z.string())
-          .describe("IDs of changes to group (from list_changes)"),
-      }),
-      outputSchema: z.object({
-        groups: z.array(
-          z.object({
-            id: z.string(),
-            change_ids: z.array(z.string()),
-            summary: z.string(),
-          })
-        ),
-      }),
-    },
-    async ({ change_ids }, _extra) => {
-      try {
-        // Resolve requested IDs against current repo state
-        const { changes, unknown } = resolveChangeIds(change_ids);
-        if (unknown.length > 0) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: `Unknown change IDs: ${unknown.join(", ")}`,
-              },
-            ],
-            isError: true,
-          };
-        }
-
-        // Shared embed→cluster pipeline (handles 0, 1, and N changes)
-        const groups = await embedAndCluster(changes);
-
-        const result = { groups };
-        return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-          structuredContent: result,
-        };
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        return {
-          content: [{ type: "text", text: message }],
-          isError: true,
-        };
-      }
-    }
-  );
-
-  // -------------------------------------------------------------------------
-  // Tool: propose_commits
-  // -------------------------------------------------------------------------
-
-  server.registerTool(
-    "propose_commits",
-    {
-      description:
-        "Given change group IDs, propose a sequence of commits. Returns CommitPlans with titles, descriptions, and the groups each commit covers.",
-      inputSchema: z.object({
-        group_ids: z
-          .array(z.string())
-          .describe("IDs of change groups to create commits for"),
-      }),
-      outputSchema: z.object({
-        commits: z.array(
-          z.object({
-            id: z.string(),
-            title: z.string(),
-            description: z.string(),
-            change_group_ids: z.array(z.string()),
-          })
-        ),
-      }),
-    },
-    async ({ group_ids }, _extra) => {
-      try {
-        const result = await proposeCommits(group_ids);
-        return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-          structuredContent: result,
-        };
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        return {
-          content: [{ type: "text", text: message }],
-          isError: true,
-        };
-      }
-    }
-  );
-
-  // -------------------------------------------------------------------------
-  // Tool: apply_commit
-  // -------------------------------------------------------------------------
-
-  server.registerTool(
-    "apply_commit",
-    {
-      description:
-        "Apply a proposed commit to the repository. Stages + commits the associated changes with safety guardrails. Defaults to dry_run mode.",
-      inputSchema: z.object({
-        commit_id: z.string().describe("ID of the commit plan to apply (from propose_commits)"),
-        confirm: z.boolean().describe("Must be true to proceed. Safety gate."),
-        dry_run: z
-          .boolean()
-          .optional()
-          .describe("Preview without mutating (default true). Set false to create a real commit."),
-        expected_head_sha: z
-          .string()
-          .optional()
-          .describe("If provided, fail if HEAD has moved (optimistic concurrency guard)"),
-        message_override: z
-          .string()
-          .optional()
-          .describe("Custom commit message (overrides heuristic title)"),
-        allow_staged: z
-          .boolean()
-          .optional()
-          .describe("Allow existing staged changes outside this commit's scope (default false)"),
-      }),
-      outputSchema: z.object({
-        success: z.boolean(),
-        dry_run: z.boolean(),
-        commit_sha: z.string().optional(),
-        committed_paths: z.array(z.string()),
-        message: z.string(),
-      }),
-    },
-    async ({ commit_id, confirm, dry_run, expected_head_sha, message_override, allow_staged }, _extra) => {
-      try {
-        const result = await applyCommit(
-          { commit_id, confirm, dry_run, expected_head_sha, message_override, allow_staged },
-        );
-        return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-          structuredContent: { ...result },
-        };
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        return {
-          content: [{ type: "text", text: message }],
-          isError: true,
-        };
-      }
-    }
-  );
-
-  // -------------------------------------------------------------------------
-  // Tool: generate_pr
-  // -------------------------------------------------------------------------
-
-  server.registerTool(
-    "generate_pr",
-    {
-      description:
-        "Generate a pull request draft from real commit SHAs. Returns a PullRequestDraft with a title, description, and the full list of commits.",
-      inputSchema: z.object({
-        commit_shas: z
-          .array(z.string())
-          .describe("Git commit SHAs (hex format, 4+ chars) to include in the PR draft"),
-      }),
-      outputSchema: z.object({
-        title: z.string(),
-        description: z.string(),
-        commits: z.array(
-          z.object({
-            id: z.string(),
-            title: z.string(),
-            description: z.string(),
-            change_group_ids: z.array(z.string()),
-          })
-        ),
-      }),
-    },
-    async ({ commit_shas }, _extra) => {
-      try {
-        const result = generatePr(commit_shas);
-        return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-          structuredContent: {
-            title: result.title,
-            description: result.description,
-            commits: result.commits.map((c) => ({ ...c })),
           },
         };
       } catch (error) {
