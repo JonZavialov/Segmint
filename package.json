@@ -1,6 +1,6 @@
 {
   "name": "segmint",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A semantic Git runtime for AI agents — exposes repository state as structured, typed primitives over MCP.",
   "license": "MIT",
   "bin": {

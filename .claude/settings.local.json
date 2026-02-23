@@ -30,7 +30,15 @@
       "Bash(npm pack:*)",
       "Bash(cat:*)",
       "Bash(grep:*)",
-      "Bash(git check-ignore:*)"
+      "Bash(git check-ignore:*)",
+      "mcp__segmint__repo_status",
+      "Bash(powershell -Command \"cd $env:TEMP; if\\(Test-Path segmint-testlog\\){Remove-Item -Recurse -Force segmint-testlog}; mkdir segmint-testlog | Out-Null; cd segmint-testlog; git init; git config user.name Test; git config user.email test@test.com; ''hello'' | Out-File hello.txt; git add .; git commit -m ''initial commit''; git log --no-merges --pretty=format:''%H'' -n 5; Remove-Item -Recurse -Force .\")",
+      "mcp__segmint__set_repo_root",
+      "mcp__segmint__list_changes",
+      "mcp__segmint__group_changes",
+      "mcp__segmint__propose_commits",
+      "mcp__segmint__get_repo_root",
+      "Bash(git commit:*)"
     ]
   }
 }
