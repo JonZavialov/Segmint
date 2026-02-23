@@ -36,15 +36,9 @@ describe("MCP server E2E (in-process)", () => {
   let client: Client;
   let dir: string;
   let cleanup: () => void;
-  let originalCwd: string;
-  let originalEnv: NodeJS.ProcessEnv;
 
   beforeAll(async () => {
     ({ dir, cleanup } = createTempRepo());
-    originalCwd = process.cwd();
-    originalEnv = { ...process.env };
-    process.chdir(dir);
-    process.env.SEGMINT_EMBEDDING_PROVIDER = "local";
 
     const server = createServer();
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -54,11 +48,18 @@ describe("MCP server E2E (in-process)", () => {
       client.connect(clientTransport),
       server.connect(serverTransport),
     ]);
+
+    // Select the temp repo as the active repository
+    const setResult = await client.callTool({
+      name: "set_repo_root",
+      arguments: { path: dir },
+    });
+    if (setResult.isError) {
+      throw new Error(`Failed to set repo root: ${(setResult.content as Array<{ text: string }>)[0].text}`);
+    }
   });
 
   afterAll(async () => {
-    process.chdir(originalCwd);
-    process.env = { ...originalEnv };
     await client.close();
     cleanup();
   });
@@ -67,15 +68,13 @@ describe("MCP server E2E (in-process)", () => {
     const result = await client.listTools();
     const names = result.tools.map((t) => t.name).sort();
     expect(names).toEqual([
-      "apply_commit",
       "blame",
       "diff_between_refs",
-      "generate_pr",
-      "group_changes",
+      "get_repo_root",
       "list_changes",
       "log",
-      "propose_commits",
       "repo_status",
+      "set_repo_root",
       "show_commit",
     ]);
   });
@@ -97,6 +96,16 @@ describe("MCP server E2E (in-process)", () => {
     const result = await client.listTools();
     const serverToolNames = result.tools.map((t) => t.name).sort();
     expect(docToolNames).toEqual(serverToolNames);
+  });
+
+  it("get_repo_root returns the configured root", async () => {
+    const result = await client.callTool({
+      name: "get_repo_root",
+      arguments: {},
+    });
+    expect(result.isError).toBeFalsy();
+    const sc = result.structuredContent as { repo_root: string | null };
+    expect(sc.repo_root).toBeTruthy();
   });
 
   it("repo_status returns structured data", async () => {
@@ -153,179 +162,6 @@ describe("MCP server E2E (in-process)", () => {
     expect(result.isError).toBeFalsy();
     const sc = result.structuredContent as { changes: unknown[] };
     expect(sc.changes.length).toBeGreaterThanOrEqual(1);
-  });
-
-  it("group_changes with unknown IDs returns error", async () => {
-    const result = await client.callTool({
-      name: "group_changes",
-      arguments: { change_ids: ["nonexistent-id"] },
-    });
-    expect(result.isError).toBe(true);
-    const text = (result.content as Array<{ text: string }>)[0].text;
-    expect(text).toContain("Unknown change IDs");
-  });
-
-  it("group_changes with single valid change (skip-embeddings path)", async () => {
-    // Create a staged change so list_changes returns at least one change
-    writeFileSync(join(dir, "gc-single.txt"), "single change content\n");
-    execFileSync("git", ["add", "gc-single.txt"], { cwd: dir });
-
-    // Get the change IDs
-    const listResult = await client.callTool({
-      name: "list_changes",
-      arguments: {},
-    });
-    const sc = listResult.structuredContent as { changes: Array<{ id: string }> };
-    expect(sc.changes.length).toBeGreaterThanOrEqual(1);
-
-    // Group with just one change — exercises the single-change shortcut path
-    const result = await client.callTool({
-      name: "group_changes",
-      arguments: { change_ids: [sc.changes[0].id] },
-    });
-    expect(result.isError).toBeFalsy();
-    const groups = (result.structuredContent as { groups: unknown[] }).groups;
-    expect(groups).toHaveLength(1);
-
-    // Cleanup
-    execFileSync("git", ["reset", "HEAD", "gc-single.txt"], { cwd: dir });
-    execFileSync("git", ["checkout", "--", "."], { cwd: dir }).toString();
-    // Remove the file if it still exists
-    try { rmSync(join(dir, "gc-single.txt")); } catch { /* ignore */ }
-  });
-
-  it("group_changes with multiple valid changes (embedding+clustering path)", async () => {
-    // Create multiple staged changes
-    writeFileSync(join(dir, "gc-a.txt"), "change a content\n");
-    writeFileSync(join(dir, "gc-b.txt"), "change b content\n");
-    execFileSync("git", ["add", "gc-a.txt", "gc-b.txt"], { cwd: dir });
-
-    // Get the change IDs
-    const listResult = await client.callTool({
-      name: "list_changes",
-      arguments: {},
-    });
-    const sc = listResult.structuredContent as { changes: Array<{ id: string }> };
-    expect(sc.changes.length).toBeGreaterThanOrEqual(2);
-
-    // Group with multiple changes — exercises embedding + clustering path
-    const changeIds = sc.changes.map((c) => c.id);
-    const result = await client.callTool({
-      name: "group_changes",
-      arguments: { change_ids: changeIds },
-    });
-    expect(result.isError).toBeFalsy();
-    const groups = (result.structuredContent as { groups: Array<{ id: string; change_ids: string[] }> }).groups;
-    expect(groups.length).toBeGreaterThanOrEqual(1);
-    // All input change IDs should appear in some group
-    const allGroupedIds = groups.flatMap((g) => g.change_ids).sort();
-    expect(allGroupedIds).toEqual(changeIds.sort());
-
-    // Cleanup
-    execFileSync("git", ["reset", "HEAD", "gc-a.txt", "gc-b.txt"], { cwd: dir });
-    try { rmSync(join(dir, "gc-a.txt")); } catch { /* ignore */ }
-    try { rmSync(join(dir, "gc-b.txt")); } catch { /* ignore */ }
-  });
-
-  it("propose_commits full pipeline (real)", async () => {
-    // Create a staged change
-    writeFileSync(join(dir, "propose-test.txt"), "propose content\n");
-    execFileSync("git", ["add", "propose-test.txt"], { cwd: dir });
-
-    // list_changes → group_changes → propose_commits
-    const listResult = await client.callTool({ name: "list_changes", arguments: {} });
-    const changes = (listResult.structuredContent as { changes: Array<{ id: string }> }).changes;
-    const changeIds = changes.map((c) => c.id);
-
-    const groupResult = await client.callTool({
-      name: "group_changes",
-      arguments: { change_ids: changeIds },
-    });
-    expect(groupResult.isError).toBeFalsy();
-    const groups = (groupResult.structuredContent as { groups: Array<{ id: string }> }).groups;
-
-    const proposeResult = await client.callTool({
-      name: "propose_commits",
-      arguments: { group_ids: groups.map((g) => g.id) },
-    });
-    expect(proposeResult.isError).toBeFalsy();
-    const sc = proposeResult.structuredContent as { commits: Array<{ id: string; title: string }> };
-    expect(sc.commits.length).toBeGreaterThanOrEqual(1);
-    expect(sc.commits[0].id).toMatch(/^commit-[0-9a-f]{8}$/);
-
-    // Cleanup
-    execFileSync("git", ["reset", "HEAD", "propose-test.txt"], { cwd: dir });
-    try { rmSync(join(dir, "propose-test.txt")); } catch { /* ignore */ }
-  });
-
-  it("propose_commits with unknown IDs returns error", async () => {
-    const result = await client.callTool({
-      name: "propose_commits",
-      arguments: { group_ids: ["group-nonexistent"] },
-    });
-    expect(result.isError).toBe(true);
-  });
-
-  it("apply_commit with confirm=true, dry_run=true returns preview", async () => {
-    writeFileSync(join(dir, "apply-test.txt"), "apply content\n");
-    execFileSync("git", ["add", "apply-test.txt"], { cwd: dir });
-
-    const listResult = await client.callTool({ name: "list_changes", arguments: {} });
-    const changes = (listResult.structuredContent as { changes: Array<{ id: string }> }).changes;
-    const groupResult = await client.callTool({
-      name: "group_changes",
-      arguments: { change_ids: changes.map((c) => c.id) },
-    });
-    const groups = (groupResult.structuredContent as { groups: Array<{ id: string }> }).groups;
-    const proposeResult = await client.callTool({
-      name: "propose_commits",
-      arguments: { group_ids: groups.map((g) => g.id) },
-    });
-    const commits = (proposeResult.structuredContent as { commits: Array<{ id: string }> }).commits;
-
-    const result = await client.callTool({
-      name: "apply_commit",
-      arguments: { commit_id: commits[0].id, confirm: true, dry_run: true },
-    });
-    expect(result.isError).toBeFalsy();
-    const sc = result.structuredContent as { success: boolean; dry_run: boolean };
-    expect(sc.success).toBe(true);
-    expect(sc.dry_run).toBe(true);
-
-    // Cleanup
-    execFileSync("git", ["reset", "HEAD", "apply-test.txt"], { cwd: dir });
-    try { rmSync(join(dir, "apply-test.txt")); } catch { /* ignore */ }
-  });
-
-  it("apply_commit with confirm=false returns error", async () => {
-    const result = await client.callTool({
-      name: "apply_commit",
-      arguments: { commit_id: "commit-abc", confirm: false },
-    });
-    expect(result.isError).toBe(true);
-    const text = (result.content as Array<{ text: string }>)[0].text;
-    expect(text).toContain("confirm must be true");
-  });
-
-  it("apply_commit with unknown ID returns error", async () => {
-    const result = await client.callTool({
-      name: "apply_commit",
-      arguments: { commit_id: "commit-nonexistent", confirm: true, dry_run: true },
-    });
-    expect(result.isError).toBe(true);
-  });
-
-  it("generate_pr with real commit SHAs", async () => {
-    // Get real SHAs from the test repo
-    const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir, encoding: "utf8" }).trim();
-    const result = await client.callTool({
-      name: "generate_pr",
-      arguments: { commit_shas: [sha] },
-    });
-    expect(result.isError).toBeFalsy();
-    const sc = result.structuredContent as { title: string; description: string };
-    expect(sc.title).toBeTruthy();
-    expect(sc.description).toBeTruthy();
   });
 
   it("diff_between_refs with invalid refs returns error", async () => {
@@ -387,13 +223,5 @@ describe("MCP server E2E (in-process)", () => {
     const sc = result.structuredContent as { lines: Array<{ line_number: number }> };
     expect(sc.lines).toHaveLength(1);
     expect(sc.lines[0].line_number).toBe(1);
-  });
-
-  it("generate_pr with invalid SHA returns error", async () => {
-    const result = await client.callTool({
-      name: "generate_pr",
-      arguments: { commit_shas: ["not-valid!"] },
-    });
-    expect(result.isError).toBe(true);
   });
 });
