@@ -10,23 +10,23 @@ The core substrate is deterministic: all tools produce structured objects direct
 
 Segmint is **infrastructure**, not an application. It provides structured Git primitives that agents operate on directly.
 
-**Core identity:** A semantic Git runtime — structured diffs, typed Change objects, commit history, blame attribution, and repository status.
+**Core identity:** A guarded Git runtime — structured read + safe write. Typed diffs, commit history, blame attribution, repository status, and controlled workspace mutation with dry-run guardrails.
 
 **What Segmint is NOT:**
-- Not a commit assistant
 - Not a PR generator
-- Not a Git workflow tool
 
 **Language standard:** All descriptions, comments, and documentation must use substrate/runtime/primitive language. Never "assistant", "helper", or "workflow tool".
 
 ## Project Status
 
-**Current phase: v0.2.0 complete. 8 MCP tools, all Tier 1 read-only. Explicit repo selection via `set_repo_root`.**
+**Current phase: v0.3.0 complete. 19 MCP tools — 9 Tier 1 read-only + 8 Tier 2 workspace mutation + 1 Tier 3 irreversible (gated). Explicit repo selection via `set_repo_root`.**
 
 Completed:
-- Phase 1: MCP stdio server wired, 8 tools registered, canonical models
+- Phase 1: MCP stdio server wired, 19 tools registered, canonical models
 - Phase 2: `list_changes` returns real uncommitted changes (staged + unstaged) parsed from `git diff`
-- Tier 1 read-only tools: `repo_status`, `log`, `show_commit`, `diff_between_refs`, `blame`
+- Tier 1 read-only tools: `repo_status`, `log`, `show_commit`, `diff_between_refs`, `blame`, `stash_list`
+- Tier 2 workspace mutation tools: `stage_changes`, `unstage_changes`, `stage_hunks`, `create_commit`, `create_branch`, `checkout_branch`, `stash_save`, `stash_pop`, `reset_soft` (all with `dry_run` guardrail)
+- Tier 3 irreversible tools: `push` (gated with `--force-with-lease`, `dry_run` defaults to `true`)
 - Repo selection: `set_repo_root` / `get_repo_root` — all tools require explicit repo selection (no implicit `process.cwd()`)
 - Safety caps: arrays capped at 200 entries with `truncated`/`omitted_count` fields
 
@@ -35,7 +35,7 @@ Planned phases (do NOT start unless explicitly instructed):
 | Phase | Scope |
 |---|---|
 | Tier 1 expansion | `list_branches`, `list_tags`, `list_remotes` |
-| Tier 2 | Workspace mutation tools with guardrails (`stage_changes`, `unstage_changes`, etc.) |
+| Tier 2 expansion | Additional workspace mutation tools with guardrails (`apply_patch`, etc.) |
 
 Do not begin future phase work speculatively.
 
@@ -61,9 +61,9 @@ They exist only as references for MCP behavior. If something in them seems wrong
 
 ## Architecture Rules
 
-1. `src/index.ts` is the MCP server entrypoint. `src/server.ts` holds the `createServer()` factory with all tool registrations. This separation enables in-process testing.
+1. `src/index.ts` is the MCP server entrypoint. `src/server.ts` holds the `createServer()` factory with all 19 tool registrations. This separation enables in-process testing.
 2. All git subprocess calls go through `src/exec-git.ts` (`execGit` for throwing, `tryExecGit` for non-throwing).
-3. Agents reason over structured objects (Change, LogCommit, CommitDetail, RepoStatus, BlameResult). Never raw git output.
+3. Agents reason over structured objects (Change, ChangeSummary, LogCommit, CommitDetail, RepoStatus, BlameResult, StageResult, UnstageResult, StageHunksResult, CommitResult, CreateBranchResult, CheckoutResult, StashEntry, StashSaveResult, StashPopResult, ResetResult, PushResult). Never raw git output.
 4. stdout is reserved for MCP JSON-RPC. All logging goes to stderr via `console.error`.
 5. No god files. Keep modules small and focused.
 6. No speculative abstractions. Only build what is explicitly required.
@@ -79,6 +79,18 @@ Defined in `src/models.ts`. These are the canonical shapes:
 - **BlameResult** — line-level blame output: `{ path, ref, lines: BlameLine[] }`
 - **BlameLine** — a single blamed line: `{ line_number, content, commit: BlameCommit }`
 - **BlameCommit** — blame commit metadata: `{ sha, short_sha, author_name, author_email, author_time, summary }`
+- **ChangeSummary** — lightweight change stats: `{ id, file_path, hunk_count, insertions, deletions }`
+- **StageResult** — staging operation result: `{ staged_paths, dry_run }`
+- **UnstageResult** — unstaging operation result: `{ unstaged_paths, dry_run }`
+- **StageHunksResult** — hunk-level staging result: `{ file_path, hunks_staged, dry_run }`
+- **CommitResult** — commit creation result: `{ sha, short_sha, subject, dry_run }`
+- **CreateBranchResult** — branch creation result: `{ branch_name, sha, dry_run }`
+- **CheckoutResult** — branch switch result: `{ branch_name, previous_branch: string | null, dry_run }`
+- **StashEntry** — a single stash entry: `{ index, message, sha }`
+- **StashSaveResult** — stash save result: `{ message, dry_run }`
+- **StashPopResult** — stash pop result: `{ index, dry_run }`
+- **ResetResult** — soft reset result: `{ ref, previous_sha, new_sha, dry_run }`
+- **PushResult** — push result: `{ remote, branch, dry_run, forced }`
 
 ## MCP Tool Contracts
 
@@ -89,11 +101,22 @@ These names and signatures are canonical. Do not rename or change contracts with
 | `set_repo_root` | 1 | `{ path: string }` | `{ repo_root: string }` | Select the repository Segmint operates on |
 | `get_repo_root` | 1 | `{}` | `{ repo_root: string \| null }` | Return the currently configured repository root |
 | `repo_status` | 1 | `{}` | `RepoStatus` | Structured repository state |
-| `list_changes` | 1 | `{}` | `{ changes: Change[] }` | List uncommitted changes as structured objects |
+| `list_changes` | 1 | `{ path?, summary_only? }` | `{ changes: Change[] \| ChangeSummary[] }` | List uncommitted changes as structured objects |
 | `log` | 1 | `{ limit?, ref?, path?, since?, until?, include_merges? }` | `{ commits: LogCommit[] }` | Structured commit history with filtering |
 | `show_commit` | 1 | `{ sha: string }` | `{ commit: CommitDetail }` | Full commit details with metadata, files, and diff |
 | `diff_between_refs` | 1 | `{ base, head, path?, unified? }` | `{ base, head, changes: Change[] }` | Structured diff between any two refs |
 | `blame` | 1 | `{ path, ref?, start_line?, end_line?, ignore_whitespace?, detect_moves? }` | `BlameResult` | Line-level attribution for a file |
+| `stage_changes` | 2 | `{ paths: string[], dry_run? }` | `StageResult` | Stage file paths via git add |
+| `unstage_changes` | 2 | `{ paths: string[], dry_run? }` | `UnstageResult` | Unstage file paths via git reset HEAD |
+| `stage_hunks` | 2 | `{ file_path, hunk_indices: number[], dry_run? }` | `StageHunksResult` | Stage specific hunks via git apply --cached |
+| `create_commit` | 2 | `{ message: string, dry_run? }` | `CommitResult` | Commit staged changes |
+| `create_branch` | 2 | `{ name, ref?, dry_run? }` | `CreateBranchResult` | Create a new branch |
+| `checkout_branch` | 2 | `{ name, dry_run? }` | `CheckoutResult` | Switch to an existing branch |
+| `stash_save` | 2 | `{ message?, dry_run? }` | `StashSaveResult` | Stash current changes |
+| `stash_list` | 1 | `{}` | `{ stashes: StashEntry[] }` | List all stashes |
+| `stash_pop` | 2 | `{ index?, dry_run? }` | `StashPopResult` | Pop a stash entry |
+| `reset_soft` | 2 | `{ ref, dry_run? }` | `ResetResult` | Soft reset HEAD, keep changes staged |
+| `push` | 3 | `{ remote?, branch?, force?, dry_run? }` | `PushResult` | Push to remote (dry_run defaults TRUE) |
 
 All tools require `set_repo_root` to be called first (except `set_repo_root` and `get_repo_root` themselves). Tools return `SEGMINT_NO_REPO` error if no repository has been selected.
 
@@ -115,7 +138,7 @@ All tools must follow these conventions:
 ```
 src/
   index.ts        — MCP server entrypoint (slim — imports createServer, connects stdio)
-  server.ts       — createServer() factory with all 8 tool registrations + repo_root state
+  server.ts       — createServer() factory with all 19 tool registrations + repo_root state
   exec-git.ts     — Centralized git command execution + error handling
   models.ts       — TypeScript interfaces for data models
   git.ts          — Git diff execution and unified diff parsing
@@ -123,7 +146,13 @@ src/
   show.ts         — Single commit detail retrieval (Tier 1 read-only)
   diff.ts         — Ref-to-ref structured diff (Tier 1 read-only)
   blame.ts        — Line-level blame attribution (Tier 1 read-only)
+  staging.ts      — Tier 2 workspace mutation: staging/unstaging file paths + hunk-level staging
   status.ts       — Repository status gathering (Tier 1 read-only)
+  commit.ts       — Tier 2: commit creation
+  branch.ts       — Tier 2: branch creation and switching
+  stash.ts        — Tier 1 read-only (list) + Tier 2 mutation (save, pop)
+  reset.ts        — Tier 2: soft reset
+  push.ts         — Tier 3: push to remote (gated)
 tests/
   unit/           — Unit tests for parsers, helpers, and isolated logic
   integration/    — Integration tests against real temporary git repos
@@ -221,6 +250,15 @@ Send these messages over stdin (each on its own line):
 {"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"show_commit","arguments":{"sha":"HEAD"}}}
 {"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"diff_between_refs","arguments":{"base":"HEAD~1","head":"HEAD"}}}
 {"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"blame","arguments":{"path":"src/index.ts"}}}
+{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"create_branch","arguments":{"name":"test-branch","dry_run":true}}}
+{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"checkout_branch","arguments":{"name":"main","dry_run":true}}}
+{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"create_commit","arguments":{"message":"test commit","dry_run":true}}}
+{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"stash_list","arguments":{}}}
+{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"stash_save","arguments":{"dry_run":true}}}
+{"jsonrpc":"2.0","id":15,"method":"tools/call","params":{"name":"stash_pop","arguments":{"dry_run":true}}}
+{"jsonrpc":"2.0","id":16,"method":"tools/call","params":{"name":"reset_soft","arguments":{"ref":"HEAD","dry_run":true}}}
+{"jsonrpc":"2.0","id":17,"method":"tools/call","params":{"name":"stage_hunks","arguments":{"file_path":"src/index.ts","hunk_indices":[0],"dry_run":true}}}
+{"jsonrpc":"2.0","id":18,"method":"tools/call","params":{"name":"push","arguments":{}}}
 ```
 
 ## Coding Standards
@@ -286,15 +324,15 @@ Send these messages over stdin (each on its own line):
 
 ## Anti-Drift Contract: Substrate Tiers
 
-> These rules exist to prevent Segmint from drifting beyond its role as read-only Git infrastructure. Every future agent must follow them.
+> These rules exist to prevent Segmint from drifting beyond its role as guarded Git infrastructure. Every future agent must follow them.
 
 ### Tier classification
 
 All tools belong to a tier. The tiers are:
 
-- **Tier 1 (read-only):** Safe, foundational tools that inspect repo state without mutation. Examples: `repo_status`, `log`, `show_commit`, `diff`, `blame`, `list_branches`, `list_tags`, `list_remotes`. All current tools are Tier 1.
-- **Tier 2 (workspace mutation):** Controlled, reversible tools that change working tree or index. Examples: `stage_changes`, `unstage_changes`, `apply_patch`, `checkout_branch`, `stash_save`, `reset_soft`. All Tier 2 tools must include explicit safety guardrails.
-- **Tier 3 (irreversible/destructive):** `push`, `rebase`, `reset --hard`, force operations. Gated behind safety/preview mechanisms. Not a near-term priority.
+- **Tier 1 (read-only):** Safe, foundational tools that inspect repo state without mutation. Implemented: `set_repo_root`, `get_repo_root`, `repo_status`, `list_changes`, `log`, `show_commit`, `diff_between_refs`, `blame`, `stash_list`. Planned: `list_branches`, `list_tags`, `list_remotes`.
+- **Tier 2 (workspace mutation):** Controlled, reversible tools that change working tree or index. Implemented: `stage_changes`, `unstage_changes`, `stage_hunks`, `create_commit`, `create_branch`, `checkout_branch`, `stash_save`, `stash_pop`, `reset_soft`. All Tier 2 tools must include explicit safety guardrails (dry_run parameter).
+- **Tier 3 (irreversible/destructive):** Implemented: `push` (gated with `--force-with-lease` guardrail, `dry_run` defaults to `true`). Planned: `rebase`, `reset --hard`. All Tier 3 tools are gated behind safety/preview mechanisms.
 
 ### Rules
 

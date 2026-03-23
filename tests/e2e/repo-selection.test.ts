@@ -141,6 +141,116 @@ describe("Repo selection E2E (non-repo cwd)", () => {
     expect(text).toContain("SEGMINT_NO_REPO");
   });
 
+  it("stage_changes returns SEGMINT_NO_REPO before set_repo_root", async () => {
+    const result = await client.callTool({
+      name: "stage_changes",
+      arguments: { paths: ["hello.txt"] },
+    });
+    expect(result.isError).toBe(true);
+    const text = (result.content as Array<{ text: string }>)[0].text;
+    expect(text).toContain("SEGMINT_NO_REPO");
+  });
+
+  it("unstage_changes returns SEGMINT_NO_REPO before set_repo_root", async () => {
+    const result = await client.callTool({
+      name: "unstage_changes",
+      arguments: { paths: ["hello.txt"] },
+    });
+    expect(result.isError).toBe(true);
+    const text = (result.content as Array<{ text: string }>)[0].text;
+    expect(text).toContain("SEGMINT_NO_REPO");
+  });
+
+  it("stage_hunks returns SEGMINT_NO_REPO before set_repo_root", async () => {
+    const result = await client.callTool({
+      name: "stage_hunks",
+      arguments: { file_path: "hello.txt", hunk_indices: [0] },
+    });
+    expect(result.isError).toBe(true);
+    const text = (result.content as Array<{ text: string }>)[0].text;
+    expect(text).toContain("SEGMINT_NO_REPO");
+  });
+
+  it("create_commit returns SEGMINT_NO_REPO before set_repo_root", async () => {
+    const result = await client.callTool({
+      name: "create_commit",
+      arguments: { message: "test" },
+    });
+    expect(result.isError).toBe(true);
+    const text = (result.content as Array<{ text: string }>)[0].text;
+    expect(text).toContain("SEGMINT_NO_REPO");
+  });
+
+  it("create_branch returns SEGMINT_NO_REPO before set_repo_root", async () => {
+    const result = await client.callTool({
+      name: "create_branch",
+      arguments: { name: "test" },
+    });
+    expect(result.isError).toBe(true);
+    const text = (result.content as Array<{ text: string }>)[0].text;
+    expect(text).toContain("SEGMINT_NO_REPO");
+  });
+
+  it("checkout_branch returns SEGMINT_NO_REPO before set_repo_root", async () => {
+    const result = await client.callTool({
+      name: "checkout_branch",
+      arguments: { name: "test" },
+    });
+    expect(result.isError).toBe(true);
+    const text = (result.content as Array<{ text: string }>)[0].text;
+    expect(text).toContain("SEGMINT_NO_REPO");
+  });
+
+  it("stash_save returns SEGMINT_NO_REPO before set_repo_root", async () => {
+    const result = await client.callTool({
+      name: "stash_save",
+      arguments: {},
+    });
+    expect(result.isError).toBe(true);
+    const text = (result.content as Array<{ text: string }>)[0].text;
+    expect(text).toContain("SEGMINT_NO_REPO");
+  });
+
+  it("stash_list returns SEGMINT_NO_REPO before set_repo_root", async () => {
+    const result = await client.callTool({
+      name: "stash_list",
+      arguments: {},
+    });
+    expect(result.isError).toBe(true);
+    const text = (result.content as Array<{ text: string }>)[0].text;
+    expect(text).toContain("SEGMINT_NO_REPO");
+  });
+
+  it("stash_pop returns SEGMINT_NO_REPO before set_repo_root", async () => {
+    const result = await client.callTool({
+      name: "stash_pop",
+      arguments: {},
+    });
+    expect(result.isError).toBe(true);
+    const text = (result.content as Array<{ text: string }>)[0].text;
+    expect(text).toContain("SEGMINT_NO_REPO");
+  });
+
+  it("reset_soft returns SEGMINT_NO_REPO before set_repo_root", async () => {
+    const result = await client.callTool({
+      name: "reset_soft",
+      arguments: { ref: "HEAD" },
+    });
+    expect(result.isError).toBe(true);
+    const text = (result.content as Array<{ text: string }>)[0].text;
+    expect(text).toContain("SEGMINT_NO_REPO");
+  });
+
+  it("push returns SEGMINT_NO_REPO before set_repo_root", async () => {
+    const result = await client.callTool({
+      name: "push",
+      arguments: {},
+    });
+    expect(result.isError).toBe(true);
+    const text = (result.content as Array<{ text: string }>)[0].text;
+    expect(text).toContain("SEGMINT_NO_REPO");
+  });
+
   // -----------------------------------------------------------------------
   // set_repo_root: configure, then verify tools work
   // -----------------------------------------------------------------------

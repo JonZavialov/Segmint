@@ -91,6 +91,22 @@ describe("getUncommittedChanges", () => {
     expect(changes[0].file_path).toBe("brand-new.txt");
   });
 
+  it("filters by path", () => {
+    writeFileSync(join(dir, "src-file.ts"), "export const x = 1;");
+    writeFileSync(join(dir, "readme.md"), "# readme");
+    execFileSync("git", ["add", "src-file.ts", "readme.md"], { cwd: dir });
+    const changes = getUncommittedChanges(dir, "src-file.ts");
+    expect(changes).toHaveLength(1);
+    expect(changes[0].file_path).toBe("src-file.ts");
+  });
+
+  it("path filter returns empty when no matches", () => {
+    writeFileSync(join(dir, "init.txt"), "modified");
+    execFileSync("git", ["add", "init.txt"], { cwd: dir });
+    const changes = getUncommittedChanges(dir, "nonexistent-path");
+    expect(changes).toEqual([]);
+  });
+
   it("returns empty or throws for non-git directory", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "no-git-"));
     try {

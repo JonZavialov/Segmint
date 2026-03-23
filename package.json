@@ -1,7 +1,7 @@
 {
   "name": "segmint",
-  "version": "0.1.1",
-  "description": "A semantic Git runtime for AI agents — exposes repository state as structured, typed primitives over MCP.",
+  "version": "0.3.0",
+  "description": "A guarded Git runtime for AI agents — structured read and safe write over MCP.",
   "license": "MIT",
   "bin": {
     "segmint": "./build/index.js"

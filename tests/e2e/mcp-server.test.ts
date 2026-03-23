@@ -69,13 +69,24 @@ describe("MCP server E2E (in-process)", () => {
     const names = result.tools.map((t) => t.name).sort();
     expect(names).toEqual([
       "blame",
+      "checkout_branch",
+      "create_branch",
+      "create_commit",
       "diff_between_refs",
       "get_repo_root",
       "list_changes",
       "log",
+      "push",
       "repo_status",
+      "reset_soft",
       "set_repo_root",
       "show_commit",
+      "stage_changes",
+      "stage_hunks",
+      "stash_list",
+      "stash_pop",
+      "stash_save",
+      "unstage_changes",
     ]);
   });
 
@@ -130,6 +141,55 @@ describe("MCP server E2E (in-process)", () => {
     expect(result.isError).toBeFalsy();
     expect(result.structuredContent).toBeDefined();
     // Restore for other tests
+    writeFileSync(join(dir, "file.txt"), "modified content\n");
+  });
+
+  it("list_changes with path filter", async () => {
+    writeFileSync(join(dir, "file.txt"), "e2e modified\n");
+    writeFileSync(join(dir, "other.txt"), "other\n");
+    execFileSync("git", ["add", "other.txt"], { cwd: dir });
+
+    const result = await client.callTool({
+      name: "list_changes",
+      arguments: { path: "file.txt" },
+    });
+    expect(result.isError).toBeFalsy();
+    const sc = result.structuredContent as { changes: Array<{ file_path: string }> };
+    expect(sc.changes).toHaveLength(1);
+    expect(sc.changes[0].file_path).toBe("file.txt");
+
+    // Restore
+    writeFileSync(join(dir, "file.txt"), "modified content\n");
+    execFileSync("git", ["reset", "HEAD", "other.txt"], { cwd: dir });
+    rmSync(join(dir, "other.txt"), { force: true });
+  });
+
+  it("list_changes with summary_only", async () => {
+    writeFileSync(join(dir, "file.txt"), "e2e modified\n");
+    const result = await client.callTool({
+      name: "list_changes",
+      arguments: { summary_only: true },
+    });
+    expect(result.isError).toBeFalsy();
+    const sc = result.structuredContent as {
+      changes: Array<{
+        id: string;
+        file_path: string;
+        hunk_count: number;
+        insertions: number;
+        deletions: number;
+        hunks?: unknown;
+      }>;
+    };
+    expect(sc.changes).toHaveLength(1);
+    expect(sc.changes[0].file_path).toBe("file.txt");
+    expect(sc.changes[0].hunk_count).toBeGreaterThanOrEqual(1);
+    expect(typeof sc.changes[0].insertions).toBe("number");
+    expect(typeof sc.changes[0].deletions).toBe("number");
+    // summary_only should NOT have hunks
+    expect(sc.changes[0].hunks).toBeUndefined();
+
+    // Restore
     writeFileSync(join(dir, "file.txt"), "modified content\n");
   });
 
@@ -223,5 +283,245 @@ describe("MCP server E2E (in-process)", () => {
     const sc = result.structuredContent as { lines: Array<{ line_number: number }> };
     expect(sc.lines).toHaveLength(1);
     expect(sc.lines[0].line_number).toBe(1);
+  });
+
+  it("stage_changes stages a file", async () => {
+    writeFileSync(join(dir, "file.txt"), "stage-test\n");
+
+    const result = await client.callTool({
+      name: "stage_changes",
+      arguments: { paths: ["file.txt"] },
+    });
+    expect(result.isError).toBeFalsy();
+    const sc = result.structuredContent as { staged_paths: string[]; dry_run: boolean };
+    expect(sc.staged_paths).toEqual(["file.txt"]);
+    expect(sc.dry_run).toBe(false);
+
+    // Unstage and restore
+    execFileSync("git", ["reset", "HEAD", "file.txt"], { cwd: dir });
+    writeFileSync(join(dir, "file.txt"), "modified content\n");
+  });
+
+  it("stage_changes dry_run does not mutate", async () => {
+    writeFileSync(join(dir, "file.txt"), "dry-run-test\n");
+
+    const result = await client.callTool({
+      name: "stage_changes",
+      arguments: { paths: ["file.txt"], dry_run: true },
+    });
+    expect(result.isError).toBeFalsy();
+    const sc = result.structuredContent as { staged_paths: string[]; dry_run: boolean };
+    expect(sc.dry_run).toBe(true);
+
+    // Restore
+    writeFileSync(join(dir, "file.txt"), "modified content\n");
+  });
+
+  it("stage_changes with empty paths returns error", async () => {
+    const result = await client.callTool({
+      name: "stage_changes",
+      arguments: { paths: [] },
+    });
+    expect(result.isError).toBe(true);
+    const text = (result.content as Array<{ text: string }>)[0].text;
+    expect(text).toContain("SEGMINT_EMPTY_PATHS");
+  });
+
+  it("unstage_changes unstages a file", async () => {
+    writeFileSync(join(dir, "file.txt"), "unstage-test\n");
+    execFileSync("git", ["add", "file.txt"], { cwd: dir });
+
+    const result = await client.callTool({
+      name: "unstage_changes",
+      arguments: { paths: ["file.txt"] },
+    });
+    expect(result.isError).toBeFalsy();
+    const sc = result.structuredContent as { unstaged_paths: string[]; dry_run: boolean };
+    expect(sc.unstaged_paths).toEqual(["file.txt"]);
+    expect(sc.dry_run).toBe(false);
+
+    // Restore
+    writeFileSync(join(dir, "file.txt"), "modified content\n");
+  });
+
+  it("unstage_changes with empty paths returns error", async () => {
+    const result = await client.callTool({
+      name: "unstage_changes",
+      arguments: { paths: [] },
+    });
+    expect(result.isError).toBe(true);
+    const text = (result.content as Array<{ text: string }>)[0].text;
+    expect(text).toContain("SEGMINT_EMPTY_PATHS");
+  });
+
+  // ---- stage_hunks ----
+
+  it("stage_hunks dry_run validates without staging", async () => {
+    writeFileSync(join(dir, "file.txt"), "hunk-test\n");
+    const result = await client.callTool({
+      name: "stage_hunks",
+      arguments: { file_path: "file.txt", hunk_indices: [0], dry_run: true },
+    });
+    expect(result.isError).toBeFalsy();
+    const sc = result.structuredContent as { file_path: string; hunks_staged: number; dry_run: boolean };
+    expect(sc.dry_run).toBe(true);
+    expect(sc.hunks_staged).toBe(1);
+    writeFileSync(join(dir, "file.txt"), "modified content\n");
+  });
+
+  it("stage_hunks with empty hunk_indices returns error", async () => {
+    const result = await client.callTool({
+      name: "stage_hunks",
+      arguments: { file_path: "file.txt", hunk_indices: [] },
+    });
+    expect(result.isError).toBe(true);
+    const text = (result.content as Array<{ text: string }>)[0].text;
+    expect(text).toContain("SEGMINT_EMPTY_HUNKS");
+  });
+
+  // ---- create_commit ----
+
+  it("create_commit dry_run validates without committing", async () => {
+    writeFileSync(join(dir, "file.txt"), "commit-test\n");
+    execFileSync("git", ["add", "file.txt"], { cwd: dir });
+
+    const result = await client.callTool({
+      name: "create_commit",
+      arguments: { message: "e2e dry commit", dry_run: true },
+    });
+    expect(result.isError).toBeFalsy();
+    const sc = result.structuredContent as { sha: string; subject: string; dry_run: boolean };
+    expect(sc.dry_run).toBe(true);
+    expect(sc.subject).toBe("e2e dry commit");
+
+    execFileSync("git", ["reset", "HEAD", "file.txt"], { cwd: dir });
+    writeFileSync(join(dir, "file.txt"), "modified content\n");
+  });
+
+  it("create_commit with nothing staged returns error", async () => {
+    const result = await client.callTool({
+      name: "create_commit",
+      arguments: { message: "should fail" },
+    });
+    expect(result.isError).toBe(true);
+    const text = (result.content as Array<{ text: string }>)[0].text;
+    expect(text).toContain("SEGMINT_NOTHING_STAGED");
+  });
+
+  // ---- create_branch ----
+
+  it("create_branch creates and returns branch info", async () => {
+    const result = await client.callTool({
+      name: "create_branch",
+      arguments: { name: "e2e-test-branch" },
+    });
+    expect(result.isError).toBeFalsy();
+    const sc = result.structuredContent as { branch_name: string; sha: string; dry_run: boolean };
+    expect(sc.branch_name).toBe("e2e-test-branch");
+    expect(sc.dry_run).toBe(false);
+  });
+
+  it("create_branch with existing name returns error", async () => {
+    const result = await client.callTool({
+      name: "create_branch",
+      arguments: { name: "e2e-test-branch" },
+    });
+    expect(result.isError).toBe(true);
+    const text = (result.content as Array<{ text: string }>)[0].text;
+    expect(text).toContain("SEGMINT_BRANCH_EXISTS");
+  });
+
+  // ---- checkout_branch ----
+
+  it("checkout_branch switches to branch", async () => {
+    const result = await client.callTool({
+      name: "checkout_branch",
+      arguments: { name: "e2e-test-branch" },
+    });
+    expect(result.isError).toBeFalsy();
+    const sc = result.structuredContent as { branch_name: string; previous_branch: string | null; dry_run: boolean };
+    expect(sc.branch_name).toBe("e2e-test-branch");
+    expect(sc.dry_run).toBe(false);
+
+    // Switch back to original branch
+    if (sc.previous_branch) {
+      await client.callTool({
+        name: "checkout_branch",
+        arguments: { name: sc.previous_branch },
+      });
+    }
+  });
+
+  it("checkout_branch with nonexistent branch returns error", async () => {
+    const result = await client.callTool({
+      name: "checkout_branch",
+      arguments: { name: "nonexistent-xyz" },
+    });
+    expect(result.isError).toBe(true);
+    const text = (result.content as Array<{ text: string }>)[0].text;
+    expect(text).toContain("SEGMINT_BRANCH_NOT_FOUND");
+  });
+
+  // ---- stash_list ----
+
+  it("stash_list returns structured stash entries", async () => {
+    const result = await client.callTool({
+      name: "stash_list",
+      arguments: {},
+    });
+    expect(result.isError).toBeFalsy();
+    const sc = result.structuredContent as { stashes: unknown[] };
+    expect(Array.isArray(sc.stashes)).toBe(true);
+  });
+
+  // ---- stash_save ----
+
+  it("stash_save with nothing to stash returns error", async () => {
+    const result = await client.callTool({
+      name: "stash_save",
+      arguments: { message: "should fail" },
+    });
+    expect(result.isError).toBe(true);
+    const text = (result.content as Array<{ text: string }>)[0].text;
+    expect(text).toContain("SEGMINT_NOTHING_TO_STASH");
+  });
+
+  // ---- stash_pop ----
+
+  it("stash_pop with no stashes returns error", async () => {
+    const result = await client.callTool({
+      name: "stash_pop",
+      arguments: { index: 99 },
+    });
+    expect(result.isError).toBe(true);
+    const text = (result.content as Array<{ text: string }>)[0].text;
+    expect(text).toContain("SEGMINT_STASH_NOT_FOUND");
+  });
+
+  // ---- reset_soft ----
+
+  it("reset_soft dry_run returns SHA info", async () => {
+    const result = await client.callTool({
+      name: "reset_soft",
+      arguments: { ref: "HEAD", dry_run: true },
+    });
+    expect(result.isError).toBeFalsy();
+    const sc = result.structuredContent as { ref: string; previous_sha: string; new_sha: string; dry_run: boolean };
+    expect(sc.dry_run).toBe(true);
+    expect(sc.previous_sha).toMatch(/^[0-9a-f]{40}$/);
+    expect(sc.new_sha).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  // ---- push ----
+
+  it("push defaults to dry_run true", async () => {
+    const result = await client.callTool({
+      name: "push",
+      arguments: {},
+    });
+    // Will error because no remote configured on temp repo, but tests the handler
+    expect(result.isError).toBe(true);
+    const text = (result.content as Array<{ text: string }>)[0].text;
+    expect(text).toContain("SEGMINT_NO_REMOTE");
   });
 });

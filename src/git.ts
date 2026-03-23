@@ -16,21 +16,23 @@ import { execGit, compareAscii } from "./exec-git.js";
  * staged hunks come first, then unstaged hunks.
  *
  * @param cwd Working directory (defaults to process.cwd())
+ * @param path Optional path filter — restricts diff to files matching this path
  * @returns Sorted Change[] with deterministic IDs
  * @throws Error if not a git repo or git is not installed
  */
-export function getUncommittedChanges(cwd?: string): Change[] {
+export function getUncommittedChanges(cwd?: string, path?: string): Change[] {
   const dir = cwd ?? process.cwd();
 
-  const stagedDiff = execGit(
-    ["diff", "--cached", "--no-color", "--unified=3"],
-    dir,
-  );
+  const stagedArgs = ["diff", "--cached", "--no-color", "--unified=3"];
+  const unstagedArgs = ["diff", "--no-color", "--unified=3"];
 
-  const unstagedDiff = execGit(
-    ["diff", "--no-color", "--unified=3"],
-    dir,
-  );
+  if (path) {
+    stagedArgs.push("--", path);
+    unstagedArgs.push("--", path);
+  }
+
+  const stagedDiff = execGit(stagedArgs, dir);
+  const unstagedDiff = execGit(unstagedArgs, dir);
 
   const staged = parseDiff(stagedDiff);
   const unstaged = parseDiff(unstagedDiff);

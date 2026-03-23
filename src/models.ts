@@ -21,6 +21,14 @@ export interface Change {
   hunks: Hunk[];
 }
 
+export interface ChangeSummary {
+  id: string;
+  file_path: string;
+  hunk_count: number;
+  insertions: number;
+  deletions: number;
+}
+
 // ---------------------------------------------------------------------------
 // Tier 1: Read-only repo intelligence
 // ---------------------------------------------------------------------------
@@ -95,4 +103,77 @@ export interface BlameResult {
   path: string;
   ref: string;
   lines: BlameLine[];
+}
+
+// ---------------------------------------------------------------------------
+// Tier 2: Workspace mutation
+// ---------------------------------------------------------------------------
+
+export interface StageResult {
+  staged_paths: string[];
+  dry_run: boolean;
+}
+
+export interface UnstageResult {
+  unstaged_paths: string[];
+  dry_run: boolean;
+}
+
+export interface StageHunksResult {
+  file_path: string;
+  hunks_staged: number;
+  dry_run: boolean;
+}
+
+export interface CommitResult {
+  sha: string;
+  short_sha: string;
+  subject: string;
+  dry_run: boolean;
+}
+
+export interface CreateBranchResult {
+  branch_name: string;
+  sha: string;
+  dry_run: boolean;
+}
+
+export interface CheckoutResult {
+  branch_name: string;
+  previous_branch: string | null;
+  dry_run: boolean;
+}
+
+export interface StashEntry {
+  index: number;
+  message: string;
+  sha: string;
+}
+
+export interface StashSaveResult {
+  message: string;
+  dry_run: boolean;
+}
+
+export interface StashPopResult {
+  index: number;
+  dry_run: boolean;
+}
+
+export interface ResetResult {
+  ref: string;
+  previous_sha: string;
+  new_sha: string;
+  dry_run: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Tier 3: Irreversible (gated)
+// ---------------------------------------------------------------------------
+
+export interface PushResult {
+  remote: string;
+  branch: string;
+  dry_run: boolean;
+  forced: boolean;
 }

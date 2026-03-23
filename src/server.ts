@@ -10,12 +10,19 @@ import { resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { getUncommittedChanges } from "./git.js";
+import type { ChangeSummary } from "./models.js";
+import { stageChanges, unstageChanges, stageHunks } from "./staging.js";
 import { getRepoStatus } from "./status.js";
 import { getLog } from "./history.js";
 import { getCommit } from "./show.js";
 import { getDiffBetweenRefs } from "./diff.js";
 import { getBlame } from "./blame.js";
 import { execGit } from "./exec-git.js";
+import { createCommit } from "./commit.js";
+import { createBranch, checkoutBranch } from "./branch.js";
+import { listStashes, saveStash, popStash } from "./stash.js";
+import { resetSoft } from "./reset.js";
+import { pushToRemote } from "./push.js";
 
 // ---------------------------------------------------------------------------
 // Shared schemas
@@ -73,7 +80,7 @@ function capArray<T>(arr: T[]): { items: T[]; truncated: boolean; omitted_count:
 /**
  * Create a fully-configured Segmint MCP server.
  *
- * The returned server has all 8 tools registered and is ready to be
+ * The returned server has all 19 tools registered and is ready to be
  * connected to any MCP transport (stdio, in-memory, etc.).
  *
  * Repo root is stored as server-instance state inside the closure.
@@ -82,7 +89,7 @@ function capArray<T>(arr: T[]): { items: T[]; truncated: boolean; omitted_count:
 export function createServer(): McpServer {
   const server = new McpServer({
     name: "segmint",
-    version: "0.1.1",
+    version: "0.3.0",
   });
 
   // -----------------------------------------------------------------------
@@ -182,25 +189,64 @@ export function createServer(): McpServer {
     {
       description:
         "List uncommitted changes in the repository, returned as structured Change objects with file paths and hunks.",
-      inputSchema: z.object({}),
+      inputSchema: z.object({
+        path: z
+          .string()
+          .optional()
+          .describe("Restrict to changes matching this path (file or directory)"),
+        summary_only: z
+          .boolean()
+          .optional()
+          .describe(
+            "When true, return only file paths and stats (hunk_count, insertions, deletions) without full hunk content. Useful for large changesets."
+          ),
+      }),
       outputSchema: z.object({
         changes: z.array(
           z.object({
             id: z.string(),
             file_path: z.string(),
-            hunks: z.array(hunkSchema),
+            hunks: z.array(hunkSchema).optional(),
+            hunk_count: z.number().optional(),
+            insertions: z.number().optional(),
+            deletions: z.number().optional(),
           })
         ),
         truncated: z.boolean().optional(),
         omitted_count: z.number().optional(),
       }),
     },
-    async (_args, _extra) => {
+    async ({ path, summary_only }, _extra) => {
       try {
         const cwd = requireRepoRoot();
-        const allChanges = getUncommittedChanges(cwd);
+        const allChanges = getUncommittedChanges(cwd, path);
         const { items, truncated, omitted_count } = capArray(allChanges);
-        const result: Record<string, unknown> = { changes: items };
+
+        let changes: Array<Record<string, unknown>>;
+
+        if (summary_only) {
+          changes = items.map((c) => {
+            let insertions = 0;
+            let deletions = 0;
+            for (const hunk of c.hunks) {
+              for (const line of hunk.lines) {
+                if (line.startsWith("+")) insertions++;
+                else if (line.startsWith("-")) deletions++;
+              }
+            }
+            return {
+              id: c.id,
+              file_path: c.file_path,
+              hunk_count: c.hunks.length,
+              insertions,
+              deletions,
+            } satisfies ChangeSummary as Record<string, unknown>;
+          });
+        } else {
+          changes = items.map((c) => ({ ...c }));
+        }
+
+        const result: Record<string, unknown> = { changes };
         if (truncated) {
           result.truncated = true;
           result.omitted_count = omitted_count;
@@ -529,6 +575,512 @@ export function createServer(): McpServer {
               commit: { ...l.commit },
             })),
           },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          content: [{ type: "text", text: message }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // -------------------------------------------------------------------------
+  // Tool: stage_changes (Tier 2 — workspace mutation)
+  // -------------------------------------------------------------------------
+
+  server.registerTool(
+    "stage_changes",
+    {
+      description:
+        "Stage file paths for commit via `git add`. Accepts explicit file paths only (no wildcards). Use dry_run to validate before executing. Reversible via unstage_changes.",
+      inputSchema: z.object({
+        paths: z
+          .array(z.string())
+          .describe("File paths to stage (relative to repo root)"),
+        dry_run: z
+          .boolean()
+          .optional()
+          .describe(
+            "When true, validate paths without staging. Default false."
+          ),
+      }),
+      outputSchema: z.object({
+        staged_paths: z.array(z.string()),
+        dry_run: z.boolean(),
+      }),
+    },
+    async ({ paths, dry_run }, _extra) => {
+      try {
+        const cwd = requireRepoRoot();
+        const result = stageChanges(paths, dry_run ?? false, cwd);
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          structuredContent: { ...result },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          content: [{ type: "text", text: message }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // -------------------------------------------------------------------------
+  // Tool: unstage_changes (Tier 2 — workspace mutation)
+  // -------------------------------------------------------------------------
+
+  server.registerTool(
+    "unstage_changes",
+    {
+      description:
+        "Unstage file paths via `git reset HEAD`. Accepts explicit file paths only (no wildcards). Use dry_run to validate before executing. Reversible via stage_changes.",
+      inputSchema: z.object({
+        paths: z
+          .array(z.string())
+          .describe("File paths to unstage (relative to repo root)"),
+        dry_run: z
+          .boolean()
+          .optional()
+          .describe(
+            "When true, validate paths without unstaging. Default false."
+          ),
+      }),
+      outputSchema: z.object({
+        unstaged_paths: z.array(z.string()),
+        dry_run: z.boolean(),
+      }),
+    },
+    async ({ paths, dry_run }, _extra) => {
+      try {
+        const cwd = requireRepoRoot();
+        const result = unstageChanges(paths, dry_run ?? false, cwd);
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          structuredContent: { ...result },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          content: [{ type: "text", text: message }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // -------------------------------------------------------------------------
+  // Tool: stage_hunks (Tier 2 — workspace mutation)
+  // -------------------------------------------------------------------------
+
+  server.registerTool(
+    "stage_hunks",
+    {
+      description:
+        "Stage specific hunks by file_path and hunk indices. Reconstructs a minimal patch with only selected hunks and applies via git apply --cached. Use dry_run to validate before executing.",
+      inputSchema: z.object({
+        file_path: z.string().describe("Repo-relative file path"),
+        hunk_indices: z
+          .array(z.number())
+          .describe(
+            "0-based indices of hunks to stage from the file's unstaged diff"
+          ),
+        dry_run: z
+          .boolean()
+          .optional()
+          .describe("When true, validate without staging. Default false."),
+      }),
+      outputSchema: z.object({
+        file_path: z.string(),
+        hunks_staged: z.number(),
+        dry_run: z.boolean(),
+      }),
+    },
+    async ({ file_path, hunk_indices, dry_run }, _extra) => {
+      try {
+        const cwd = requireRepoRoot();
+        const result = stageHunks(
+          file_path,
+          hunk_indices,
+          dry_run ?? false,
+          cwd,
+        );
+        return {
+          content: [
+            { type: "text", text: JSON.stringify(result, null, 2) },
+          ],
+          structuredContent: { ...result },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          content: [{ type: "text", text: message }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // -------------------------------------------------------------------------
+  // Tool: create_commit (Tier 2 — workspace mutation)
+  // -------------------------------------------------------------------------
+
+  server.registerTool(
+    "create_commit",
+    {
+      description:
+        "Commit staged changes with a message. Use dry_run to inspect what would be committed.",
+      inputSchema: z.object({
+        message: z.string().describe("Commit message"),
+        dry_run: z
+          .boolean()
+          .optional()
+          .describe("When true, validate without committing. Default false."),
+      }),
+      outputSchema: z.object({
+        sha: z.string(),
+        short_sha: z.string(),
+        subject: z.string(),
+        dry_run: z.boolean(),
+      }),
+    },
+    async ({ message, dry_run }, _extra) => {
+      try {
+        const cwd = requireRepoRoot();
+        const result = createCommit(message, dry_run ?? false, cwd);
+        return {
+          content: [
+            { type: "text", text: JSON.stringify(result, null, 2) },
+          ],
+          structuredContent: { ...result },
+        };
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        return {
+          content: [{ type: "text", text: msg }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // -------------------------------------------------------------------------
+  // Tool: create_branch (Tier 2 — workspace mutation)
+  // -------------------------------------------------------------------------
+
+  server.registerTool(
+    "create_branch",
+    {
+      description:
+        "Create a new branch at a ref. Use dry_run to validate before creating.",
+      inputSchema: z.object({
+        name: z.string().describe("Branch name to create"),
+        ref: z
+          .string()
+          .optional()
+          .describe("Starting ref (default HEAD)"),
+        dry_run: z
+          .boolean()
+          .optional()
+          .describe("When true, validate without creating. Default false."),
+      }),
+      outputSchema: z.object({
+        branch_name: z.string(),
+        sha: z.string(),
+        dry_run: z.boolean(),
+      }),
+    },
+    async ({ name, ref, dry_run }, _extra) => {
+      try {
+        const cwd = requireRepoRoot();
+        const result = createBranch(name, ref, dry_run ?? false, cwd);
+        return {
+          content: [
+            { type: "text", text: JSON.stringify(result, null, 2) },
+          ],
+          structuredContent: { ...result },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          content: [{ type: "text", text: message }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // -------------------------------------------------------------------------
+  // Tool: checkout_branch (Tier 2 — workspace mutation)
+  // -------------------------------------------------------------------------
+
+  server.registerTool(
+    "checkout_branch",
+    {
+      description:
+        "Switch to an existing branch. Git naturally refuses if uncommitted changes would be overwritten. Use dry_run to validate before switching.",
+      inputSchema: z.object({
+        name: z.string().describe("Branch name to switch to"),
+        dry_run: z
+          .boolean()
+          .optional()
+          .describe("When true, validate without switching. Default false."),
+      }),
+      outputSchema: z.object({
+        branch_name: z.string(),
+        previous_branch: z.string().nullable(),
+        dry_run: z.boolean(),
+      }),
+    },
+    async ({ name, dry_run }, _extra) => {
+      try {
+        const cwd = requireRepoRoot();
+        const result = checkoutBranch(name, dry_run ?? false, cwd);
+        return {
+          content: [
+            { type: "text", text: JSON.stringify(result, null, 2) },
+          ],
+          structuredContent: { ...result },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          content: [{ type: "text", text: message }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // -------------------------------------------------------------------------
+  // Tool: stash_save (Tier 2 — workspace mutation)
+  // -------------------------------------------------------------------------
+
+  server.registerTool(
+    "stash_save",
+    {
+      description:
+        "Stash current changes. Use dry_run to check if there are changes to stash.",
+      inputSchema: z.object({
+        message: z
+          .string()
+          .optional()
+          .describe("Optional stash message"),
+        dry_run: z
+          .boolean()
+          .optional()
+          .describe("When true, validate without stashing. Default false."),
+      }),
+      outputSchema: z.object({
+        message: z.string(),
+        dry_run: z.boolean(),
+      }),
+    },
+    async ({ message, dry_run }, _extra) => {
+      try {
+        const cwd = requireRepoRoot();
+        const result = saveStash(message, dry_run ?? false, cwd);
+        return {
+          content: [
+            { type: "text", text: JSON.stringify(result, null, 2) },
+          ],
+          structuredContent: { ...result },
+        };
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        return {
+          content: [{ type: "text", text: msg }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // -------------------------------------------------------------------------
+  // Tool: stash_list (Tier 1 — read-only)
+  // -------------------------------------------------------------------------
+
+  server.registerTool(
+    "stash_list",
+    {
+      description:
+        "List all stashes as structured entries with index, message, and SHA.",
+      inputSchema: z.object({}),
+      outputSchema: z.object({
+        stashes: z.array(
+          z.object({
+            index: z.number(),
+            message: z.string(),
+            sha: z.string(),
+          })
+        ),
+      }),
+    },
+    async (_args, _extra) => {
+      try {
+        const cwd = requireRepoRoot();
+        const result = listStashes(cwd);
+        return {
+          content: [
+            { type: "text", text: JSON.stringify(result, null, 2) },
+          ],
+          structuredContent: {
+            stashes: result.stashes.map((s) => ({ ...s })),
+          },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          content: [{ type: "text", text: message }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // -------------------------------------------------------------------------
+  // Tool: stash_pop (Tier 2 — workspace mutation)
+  // -------------------------------------------------------------------------
+
+  server.registerTool(
+    "stash_pop",
+    {
+      description:
+        "Pop a stash entry, applying it to the working tree. Use dry_run to validate the stash exists.",
+      inputSchema: z.object({
+        index: z
+          .number()
+          .optional()
+          .describe("Stash index to pop (default 0)"),
+        dry_run: z
+          .boolean()
+          .optional()
+          .describe("When true, validate without popping. Default false."),
+      }),
+      outputSchema: z.object({
+        index: z.number(),
+        dry_run: z.boolean(),
+      }),
+    },
+    async ({ index, dry_run }, _extra) => {
+      try {
+        const cwd = requireRepoRoot();
+        const result = popStash(index, dry_run ?? false, cwd);
+        return {
+          content: [
+            { type: "text", text: JSON.stringify(result, null, 2) },
+          ],
+          structuredContent: { ...result },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          content: [{ type: "text", text: message }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // -------------------------------------------------------------------------
+  // Tool: reset_soft (Tier 2 — workspace mutation)
+  // -------------------------------------------------------------------------
+
+  server.registerTool(
+    "reset_soft",
+    {
+      description:
+        "Move HEAD backward while keeping all changes staged. Use dry_run to preview the reset target.",
+      inputSchema: z.object({
+        ref: z
+          .string()
+          .describe("Target ref to reset to (e.g., HEAD~1, a SHA)"),
+        dry_run: z
+          .boolean()
+          .optional()
+          .describe("When true, validate without resetting. Default false."),
+      }),
+      outputSchema: z.object({
+        ref: z.string(),
+        previous_sha: z.string(),
+        new_sha: z.string(),
+        dry_run: z.boolean(),
+      }),
+    },
+    async ({ ref, dry_run }, _extra) => {
+      try {
+        const cwd = requireRepoRoot();
+        const result = resetSoft(ref, dry_run ?? false, cwd);
+        return {
+          content: [
+            { type: "text", text: JSON.stringify(result, null, 2) },
+          ],
+          structuredContent: { ...result },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          content: [{ type: "text", text: message }],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // -------------------------------------------------------------------------
+  // Tool: push (Tier 3 — irreversible, gated)
+  // -------------------------------------------------------------------------
+
+  server.registerTool(
+    "push",
+    {
+      description:
+        "Push to remote. SAFETY: dry_run defaults to true — set dry_run: false explicitly to execute. Force push uses --force-with-lease for safety.",
+      inputSchema: z.object({
+        remote: z
+          .string()
+          .optional()
+          .describe("Remote name (default 'origin')"),
+        branch: z
+          .string()
+          .optional()
+          .describe("Branch to push (default: current branch)"),
+        force: z
+          .boolean()
+          .optional()
+          .describe("Use --force-with-lease (default false)"),
+        dry_run: z
+          .boolean()
+          .optional()
+          .describe(
+            "Simulate push without executing. DEFAULT TRUE for safety."
+          ),
+      }),
+      outputSchema: z.object({
+        remote: z.string(),
+        branch: z.string(),
+        dry_run: z.boolean(),
+        forced: z.boolean(),
+      }),
+    },
+    async ({ remote, branch, force, dry_run }, _extra) => {
+      try {
+        const cwd = requireRepoRoot();
+        const result = pushToRemote(
+          remote,
+          branch,
+          force ?? false,
+          dry_run ?? true,
+          cwd,
+        );
+        return {
+          content: [
+            { type: "text", text: JSON.stringify(result, null, 2) },
+          ],
+          structuredContent: { ...result },
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);

@@ -29,10 +29,18 @@ export interface ExecGitResult {
  *
  * Use for calls that must succeed (diff, log, show, etc.).
  */
-export function execGit(args: string[], cwd?: string): string {
+export function execGit(
+  args: string[],
+  cwd?: string,
+  input?: string,
+): string {
   const dir = cwd ?? process.cwd();
   try {
-    return execFileSync("git", args, { ...EXEC_OPTS_BASE, cwd: dir });
+    const opts =
+      input !== undefined
+        ? { ...EXEC_OPTS_BASE, cwd: dir, input }
+        : { ...EXEC_OPTS_BASE, cwd: dir };
+    return execFileSync("git", args, opts);
   } catch (err) {
     throwGitError(err);
   }
